@@ -161,6 +161,21 @@ pub const Node = struct {
         }
     }
 
+    pub fn collectLeavesSlice(self: *Node, out: []*Node, count: *usize) void {
+        switch (self.data) {
+            .leaf => {
+                if (count.* < out.len) {
+                    out[count.*] = self;
+                    count.* += 1;
+                }
+            },
+            .split => |s| {
+                s.first.collectLeavesSlice(out, count);
+                s.second.collectLeavesSlice(out, count);
+            },
+        }
+    }
+
     pub fn splitLeaf(
         allocator: std.mem.Allocator,
         root_ptr: **Node,
@@ -296,13 +311,13 @@ pub const Node = struct {
         }
     }
 
-    pub fn findAdjacentLeaf(self: *Node, current_id: u32, dir: Direction, allocator: std.mem.Allocator) ?u32 {
-        var leaves = std.ArrayList(*Node).empty;
-        defer leaves.deinit(allocator);
-        self.collectLeaves(&leaves, allocator) catch return null;
+    pub fn findAdjacentLeaf(self: *Node, current_id: u32, dir: Direction) ?u32 {
+        var leaf_buf: [64]*Node = undefined;
+        var leaf_count: usize = 0;
+        self.collectLeavesSlice(&leaf_buf, &leaf_count);
 
         var current_node: ?*Node = null;
-        for (leaves.items) |leaf| {
+        for (leaf_buf[0..leaf_count]) |leaf| {
             if (leaf.data.leaf.id == current_id) {
                 current_node = leaf;
                 break;
@@ -314,7 +329,7 @@ pub const Node = struct {
         var best_id: ?u32 = null;
         var min_dist: i64 = std.math.maxInt(i64);
 
-        for (leaves.items) |leaf| {
+        for (leaf_buf[0..leaf_count]) |leaf| {
             if (leaf.data.leaf.id == current_id) continue;
             const other_c = leaf.rect.center();
 
@@ -413,10 +428,10 @@ test "tree directional navigation" {
     const area = Rect{ .x = 0, .y = 0, .width = 81, .height = 25 };
     root.computeLayout(area);
 
-    try testing.expectEqual(@as(?u32, 2), root.findAdjacentLeaf(1, .right, testing.allocator));
-    try testing.expectEqual(@as(?u32, 1), root.findAdjacentLeaf(2, .left, testing.allocator));
-    try testing.expectEqual(@as(?u32, 3), root.findAdjacentLeaf(2, .down, testing.allocator));
-    try testing.expectEqual(@as(?u32, 2), root.findAdjacentLeaf(3, .up, testing.allocator));
+    try testing.expectEqual(@as(?u32, 2), root.findAdjacentLeaf(1, .right));
+    try testing.expectEqual(@as(?u32, 1), root.findAdjacentLeaf(2, .left));
+    try testing.expectEqual(@as(?u32, 3), root.findAdjacentLeaf(2, .down));
+    try testing.expectEqual(@as(?u32, 2), root.findAdjacentLeaf(3, .up));
 }
 
 test "tree nested 2x2 grid (4 panes) navigation" {
@@ -433,11 +448,11 @@ test "tree nested 2x2 grid (4 panes) navigation" {
 
     try testing.expectEqual(@as(usize, 4), root.countLeaves());
 
-    try testing.expectEqual(@as(?u32, 2), root.findAdjacentLeaf(1, .right, testing.allocator));
-    try testing.expectEqual(@as(?u32, 3), root.findAdjacentLeaf(1, .down, testing.allocator));
+    try testing.expectEqual(@as(?u32, 2), root.findAdjacentLeaf(1, .right));
+    try testing.expectEqual(@as(?u32, 3), root.findAdjacentLeaf(1, .down));
 
-    try testing.expectEqual(@as(?u32, 3), root.findAdjacentLeaf(4, .left, testing.allocator));
-    try testing.expectEqual(@as(?u32, 2), root.findAdjacentLeaf(4, .up, testing.allocator));
+    try testing.expectEqual(@as(?u32, 3), root.findAdjacentLeaf(4, .left));
+    try testing.expectEqual(@as(?u32, 2), root.findAdjacentLeaf(4, .up));
 }
 
 test "tree pane resizing updates ratios and layout dimensions" {

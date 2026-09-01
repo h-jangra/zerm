@@ -78,7 +78,14 @@ pub const BorderStyle = enum {
     }
 };
 
+pub const TabBarShow = enum {
+    auto,
+    always,
+    never,
+};
+
 pub const Theme = struct {
+    tab_bar_show: TabBarShow = .auto,
     tab_format: [64]u8 = [_]u8{0} ** 64,
     tab_format_len: usize = 0,
 
@@ -269,6 +276,8 @@ pub const default_ini_content =
     \\copy = ctrl+shift+c, alt+c
     \\
     \\[tabs]
+    \\# Tab bar visibility: auto (show when >1 tab), always (show even with 1 tab), never
+    \\# show = auto
     \\# Tab title format: use {index}, {title}, {flags} or tmux-style #I, #W, #F
     \\# Enclose in quotes (single '...' or double "...") to preserve exact spacing and padding
     \\format = " [{index} {title}] "
@@ -419,6 +428,15 @@ pub fn parseIniIntoConfig(content: []const u8, cfg: *Config) void {
                     cfg.theme.setActiveTabFormat(unquote(val));
                 } else if (std.ascii.eqlIgnoreCase(key, "inactive_format") or std.ascii.eqlIgnoreCase(key, "window_status_format")) {
                     cfg.theme.setInactiveTabFormat(unquote(val));
+                } else if (std.ascii.eqlIgnoreCase(key, "show") or std.ascii.eqlIgnoreCase(key, "tab_bar") or std.ascii.eqlIgnoreCase(key, "show_tab_bar") or std.ascii.eqlIgnoreCase(key, "tab_bar_show")) {
+                    const st = std.mem.trim(u8, val, " \t\"'");
+                    if (std.ascii.eqlIgnoreCase(st, "always") or std.ascii.eqlIgnoreCase(st, "true") or std.ascii.eqlIgnoreCase(st, "yes") or std.ascii.eqlIgnoreCase(st, "1") or std.ascii.eqlIgnoreCase(st, "on")) {
+                        cfg.theme.tab_bar_show = .always;
+                    } else if (std.ascii.eqlIgnoreCase(st, "never") or std.ascii.eqlIgnoreCase(st, "false") or std.ascii.eqlIgnoreCase(st, "no") or std.ascii.eqlIgnoreCase(st, "0") or std.ascii.eqlIgnoreCase(st, "off")) {
+                        cfg.theme.tab_bar_show = .never;
+                    } else {
+                        cfg.theme.tab_bar_show = .auto;
+                    }
                 } else if (std.ascii.eqlIgnoreCase(key, "tab_bar_bg")) {
                     if (parseColor(val)) |c| cfg.theme.tab_bar_bg = c;
                 } else if (std.ascii.eqlIgnoreCase(key, "active_bg")) {

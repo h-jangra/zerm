@@ -126,22 +126,28 @@ pub const Pane = struct {
             const start_col: u16 = if (y == norm.s_y) norm.s_x else 0;
             const end_col: u16 = if (y == norm.e_y) norm.e_x else (if (self.vterm.width > 0) self.vterm.width - 1 else 0);
 
-            var line_chars = std.ArrayList(u8).empty;
-            defer line_chars.deinit(allocator);
+            var line_buf: [1024]u8 = undefined;
+            var line_len: usize = 0;
 
             var x = start_col;
             while (x <= end_col and x < self.vterm.width) : (x += 1) {
                 const cell = self.vterm.getRenderCell(x, y);
-                var utf8_buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(cell.char, &utf8_buf) catch 0;
-                if (len > 0) {
-                    try line_chars.appendSlice(allocator, utf8_buf[0..len]);
+                if (cell.char < 128) {
+                    if (line_len < line_buf.len) {
+                        line_buf[line_len] = if (cell.char == 0) ' ' else @intCast(cell.char);
+                        line_len += 1;
+                    }
                 } else {
-                    try line_chars.append(allocator, ' ');
+                    var utf8_buf: [4]u8 = undefined;
+                    const len = std.unicode.utf8Encode(cell.char, &utf8_buf) catch 0;
+                    if (len > 0 and line_len + len <= line_buf.len) {
+                        @memcpy(line_buf[line_len .. line_len + len], utf8_buf[0..len]);
+                        line_len += len;
+                    }
                 }
             }
 
-            const line_slice = std.mem.trimEnd(u8, line_chars.items, " ");
+            const line_slice = std.mem.trimEnd(u8, line_buf[0..line_len], " ");
             try text_list.appendSlice(allocator, line_slice);
 
             if (y < norm.e_y) {
@@ -228,11 +234,11 @@ pub const Tab = struct {
         const root = self.root orelse return;
         root.computeLayout(area);
 
-        var leaves = std.ArrayList(*tree_mod.Node).empty;
-        defer leaves.deinit(self.allocator);
-        root.collectLeaves(&leaves, self.allocator) catch return;
+        var leaf_buf: [64]*tree_mod.Node = undefined;
+        var leaf_count: usize = 0;
+        root.collectLeavesSlice(&leaf_buf, &leaf_count);
 
-        for (leaves.items) |leaf| {
+        for (leaf_buf[0..leaf_count]) |leaf| {
             if (self.panes.get(leaf.data.leaf.id)) |pane| {
                 pane.resize(leaf.rect);
             }
@@ -263,10 +269,10 @@ pub const Tab = struct {
 
         var candidate_id: ?u32 = null;
         if (self.root) |r| {
-            candidate_id = r.findAdjacentLeaf(target_id, .left, self.allocator) orelse
-                r.findAdjacentLeaf(target_id, .right, self.allocator) orelse
-                r.findAdjacentLeaf(target_id, .up, self.allocator) orelse
-                r.findAdjacentLeaf(target_id, .down, self.allocator);
+            candidate_id = r.findAdjacentLeaf(target_id, .left) orelse
+                r.findAdjacentLeaf(target_id, .right) orelse
+                r.findAdjacentLeaf(target_id, .up) orelse
+                r.findAdjacentLeaf(target_id, .down);
         }
 
         if (self.root) |*r_ptr| {
@@ -302,7 +308,7 @@ pub const Tab = struct {
 
     pub fn navigateFocus(self: *Tab, dir: tree_mod.Direction) void {
         const root = self.root orelse return;
-        if (root.findAdjacentLeaf(self.focused_pane_id, dir, self.allocator)) |adj_id| {
+        if (root.findAdjacentLeaf(self.focused_pane_id, dir)) |adj_id| {
             if (self.panes.contains(adj_id)) {
                 self.focused_pane_id = adj_id;
             }

@@ -15,4 +15,6 @@ test {
     _ = @import("tree.zig");
     _ = @import("input.zig");
     _ = @import("config.zig");
+    _ = @import("renderer.zig");
+    _ = @import("tab.zig");
 }

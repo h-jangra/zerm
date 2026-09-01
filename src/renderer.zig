@@ -16,6 +16,8 @@ pub const Renderer = struct {
     prev_cursor_x: u16 = 0xFFFF,
     prev_cursor_y: u16 = 0xFFFF,
     prev_cursor_visible: bool = true,
+    prev_title: [128]u8 = [_]u8{0} ** 128,
+    prev_title_len: usize = 0xFFFF,
 
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Renderer {
         const w = @max(1, width);
@@ -41,6 +43,8 @@ pub const Renderer = struct {
             .prev_cursor_x = 0xFFFF,
             .prev_cursor_y = 0xFFFF,
             .prev_cursor_visible = true,
+            .prev_title = [_]u8{0} ** 128,
+            .prev_title_len = 0xFFFF,
         };
     }
 
@@ -77,6 +81,7 @@ pub const Renderer = struct {
         @memset(self.front, .{ .char = 0 });
         self.prev_cursor_x = 0xFFFF;
         self.prev_cursor_y = 0xFFFF;
+        self.prev_title_len = 0xFFFF;
     }
 
     pub fn render(
@@ -90,27 +95,31 @@ pub const Renderer = struct {
         @memset(self.back, vterm_mod.Cell.empty());
 
         const active_tab = tabs[active_tab_idx];
-        const num_tabs = tabs.len;
-        const tab_bar_h: u16 = if (num_tabs > 1) 1 else 0;
+        const tab_bar_visible = switch (theme.tab_bar_show) {
+            .always => true,
+            .never => false,
+            .auto => tabs.len > 1,
+        };
+        const tab_bar_h: u16 = if (tab_bar_visible) 1 else 0;
 
-        if (num_tabs > 1) {
+        if (tab_bar_visible) {
             self.renderTabBar(tabs, active_tab_idx, theme);
         }
 
-        var leaves = std.ArrayList(*tree_mod.Node).empty;
-        defer leaves.deinit(self.allocator);
+        var leaf_buf: [64]*tree_mod.Node = undefined;
+        var leaf_count: usize = 0;
         if (active_tab.root) |r| {
-            r.collectLeaves(&leaves, self.allocator) catch {};
+            r.collectLeavesSlice(&leaf_buf, &leaf_count);
         }
 
-        for (leaves.items) |leaf| {
+        for (leaf_buf[0..leaf_count]) |leaf| {
             if (active_tab.panes.get(leaf.data.leaf.id)) |pane| {
                 self.blitPane(pane, leaf.rect);
             }
         }
 
         if (active_tab.root) |r| {
-            if (leaves.items.len > 1) {
+            if (leaf_count > 1) {
                 self.renderBorders(r, active_tab.focused_pane_id, theme);
             }
         }
@@ -166,36 +175,63 @@ pub const Renderer = struct {
         const pane_w = pane.vterm.width;
         const pane_h = pane.vterm.height;
 
-        var py: u16 = 0;
-        while (py < pane_h and rect.y + py < self.height) : (py += 1) {
-            const sy = rect.y + py;
-            const screen_row = @as(usize, sy) * self.width;
-
-            var px: u16 = 0;
-            while (px < pane_w and rect.x + px < self.width) : (px += 1) {
-                const sx = rect.x + px;
-                var cell = pane.vterm.getRenderCell(px, py);
-                if (pane.selection.isSelected(px, py)) {
-                    cell.attrs.reverse = !cell.attrs.reverse;
+        if (pane.vterm.scroll_offset == 0 and !pane.selection.active) {
+            // Fast path: direct row memcpy from activeGrid
+            const grid = pane.vterm.activeGrid();
+            var py: u16 = 0;
+            while (py < pane_h and rect.y + py < self.height) : (py += 1) {
+                const screen_row = @as(usize, rect.y + py) * self.width;
+                const grid_row = @as(usize, py) * pane_w;
+                const copy_w = @min(pane_w, if (rect.x < self.width) self.width - rect.x else 0);
+                if (copy_w > 0) {
+                    const screen_start = screen_row + rect.x;
+                    @memcpy(self.back[screen_start .. screen_start + copy_w], grid[grid_row .. grid_row + copy_w]);
                 }
-                self.back[screen_row + sx] = cell;
+            }
+        } else {
+            // Selection / scrollback rendering path
+            const norm = if (pane.selection.active) pane.selection.getNormalized() else null;
+            var py: u16 = 0;
+            while (py < pane_h and rect.y + py < self.height) : (py += 1) {
+                const sy = rect.y + py;
+                const screen_row = @as(usize, sy) * self.width;
+
+                var px: u16 = 0;
+                while (px < pane_w and rect.x + px < self.width) : (px += 1) {
+                    const sx = rect.x + px;
+                    var cell = pane.vterm.getRenderCell(px, py);
+                    if (norm) |n| {
+                        const in_sel = (sy >= n.s_y and sy <= n.e_y) and blk: {
+                            if (n.s_y == n.e_y) break :blk (px >= n.s_x and px <= n.e_x);
+                            if (py == n.s_y) break :blk (px >= n.s_x);
+                            if (py == n.e_y) break :blk (px <= n.e_x);
+                            break :blk true;
+                        };
+                        if (in_sel) {
+                            cell.attrs.reverse = !cell.attrs.reverse;
+                        }
+                    }
+                    self.back[screen_row + sx] = cell;
+                }
             }
         }
 
         if (pane.vterm.scroll_offset > 0 and pane_w >= 14 and pane_h >= 2) {
             var badge_buf: [32]u8 = undefined;
-            const badge_str = std.fmt.bufPrint(&badge_buf, " [{d}/{d}] ", .{ pane.vterm.scroll_offset, pane.vterm.scrollback.items.len }) catch "";
+            const badge_str = std.fmt.bufPrint(&badge_buf, " [{d}/{d}] ", .{ pane.vterm.scroll_offset, pane.vterm.scrollback.len() }) catch "";
             if (badge_str.len < pane_w) {
                 const badge_x = rect.x + pane_w - @as(u16, @intCast(badge_str.len));
                 const badge_y = rect.y;
                 const screen_row = @as(usize, badge_y) * self.width;
                 for (badge_str, 0..) |c, i| {
-                    self.back[screen_row + badge_x + i] = .{
-                        .char = c,
-                        .fg = vterm_mod.Color.indexed(0),
-                        .bg = vterm_mod.Color.indexed(11),
-                        .attrs = .{ .bold = true },
-                    };
+                    if (badge_x + i < self.width) {
+                        self.back[screen_row + badge_x + i] = .{
+                            .char = c,
+                            .fg = vterm_mod.Color.indexed(0),
+                            .bg = vterm_mod.Color.indexed(11),
+                            .attrs = .{ .bold = true },
+                        };
+                    }
                 }
             }
         }
@@ -298,7 +334,9 @@ pub const Renderer = struct {
                     }
 
                     if (cursor_y != y or cursor_x != x) {
-                        try self.out_buf.print(self.allocator, "\x1b[{d};{d}H", .{ y + 1, x + 1 });
+                        var pos_buf: [32]u8 = undefined;
+                        const pos_str = std.fmt.bufPrint(&pos_buf, "\x1b[{d};{d}H", .{ y + 1, x + 1 }) catch "";
+                        try self.out_buf.appendSlice(self.allocator, pos_str);
                         cursor_y = y;
                         cursor_x = x;
                     }
@@ -310,18 +348,34 @@ pub const Renderer = struct {
                         cur_bg = back_cell.bg;
                     }
 
-                    var utf8_buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(back_cell.char, &utf8_buf) catch 0;
-                    if (len > 0) {
-                        try self.out_buf.appendSlice(self.allocator, utf8_buf[0..len]);
+                    if (back_cell.char < 128) {
+                        try self.out_buf.append(self.allocator, if (back_cell.char == 0) ' ' else @intCast(back_cell.char));
                     } else {
-                        try self.out_buf.append(self.allocator, ' ');
+                        var utf8_buf: [4]u8 = undefined;
+                        const len = std.unicode.utf8Encode(back_cell.char, &utf8_buf) catch 0;
+                        if (len > 0) {
+                            try self.out_buf.appendSlice(self.allocator, utf8_buf[0..len]);
+                        } else {
+                            try self.out_buf.append(self.allocator, ' ');
+                        }
                     }
 
                     self.front[idx] = back_cell;
                     cursor_x += 1;
                 }
             }
+        }
+
+        const active_title = active_tab.getTitle();
+        const title_changed = (self.prev_title_len == 0xFFFF or !std.mem.eql(u8, active_title, self.prev_title[0..self.prev_title_len]));
+        if (title_changed) {
+            const copy_len = @min(self.prev_title.len, active_title.len);
+            @memcpy(self.prev_title[0..copy_len], active_title[0..copy_len]);
+            self.prev_title_len = copy_len;
+
+            try self.out_buf.appendSlice(self.allocator, "\x1b]0;");
+            try self.out_buf.appendSlice(self.allocator, active_title);
+            try self.out_buf.appendSlice(self.allocator, "\x1b\\");
         }
 
         const cursor_moved = (target_cursor_x != self.prev_cursor_x or target_cursor_y != self.prev_cursor_y);
@@ -331,13 +385,17 @@ pub const Renderer = struct {
         if (cells_changed) {
             try self.out_buf.appendSlice(self.allocator, "\x1b[0m");
 
-            try self.out_buf.print(self.allocator, "\x1b[{d};{d}H", .{ target_cursor_y, target_cursor_x });
+            var pos_buf: [32]u8 = undefined;
+            const pos_str = std.fmt.bufPrint(&pos_buf, "\x1b[{d};{d}H", .{ target_cursor_y, target_cursor_x }) catch "";
+            try self.out_buf.appendSlice(self.allocator, pos_str);
             self.prev_cursor_x = target_cursor_x;
             self.prev_cursor_y = target_cursor_y;
 
             if (shape_changed) {
                 self.current_cursor_shape = target_cursor_shape;
-                try self.out_buf.print(self.allocator, "\x1b[{d} q", .{self.current_cursor_shape});
+                var shp_buf: [16]u8 = undefined;
+                const shp_str = std.fmt.bufPrint(&shp_buf, "\x1b[{d} q", .{self.current_cursor_shape}) catch "";
+                try self.out_buf.appendSlice(self.allocator, shp_str);
             }
 
             if (target_cursor_visible) {
@@ -350,16 +408,20 @@ pub const Renderer = struct {
             try self.out_buf.appendSlice(self.allocator, "\x1b[?2026l");
 
             _ = posix.system.write(posix.STDOUT_FILENO, self.out_buf.items.ptr, self.out_buf.items.len);
-        } else if (cursor_moved or shape_changed or visibility_changed) {
+        } else if (cursor_moved or shape_changed or visibility_changed or title_changed) {
             if (cursor_moved) {
-                try self.out_buf.print(self.allocator, "\x1b[{d};{d}H", .{ target_cursor_y, target_cursor_x });
+                var pos_buf: [32]u8 = undefined;
+                const pos_str = std.fmt.bufPrint(&pos_buf, "\x1b[{d};{d}H", .{ target_cursor_y, target_cursor_x }) catch "";
+                try self.out_buf.appendSlice(self.allocator, pos_str);
                 self.prev_cursor_x = target_cursor_x;
                 self.prev_cursor_y = target_cursor_y;
             }
 
             if (shape_changed) {
                 self.current_cursor_shape = target_cursor_shape;
-                try self.out_buf.print(self.allocator, "\x1b[{d} q", .{self.current_cursor_shape});
+                var shp_buf: [16]u8 = undefined;
+                const shp_str = std.fmt.bufPrint(&shp_buf, "\x1b[{d} q", .{self.current_cursor_shape}) catch "";
+                try self.out_buf.appendSlice(self.allocator, shp_str);
             }
 
             if (visibility_changed) {
@@ -383,27 +445,50 @@ pub const Renderer = struct {
         fg: vterm_mod.Color,
         bg: vterm_mod.Color,
     ) !void {
-        try self.out_buf.appendSlice(self.allocator, "\x1b[0");
-        if (attrs.bold) try self.out_buf.appendSlice(self.allocator, ";1");
-        if (attrs.dim) try self.out_buf.appendSlice(self.allocator, ";2");
-        if (attrs.italic) try self.out_buf.appendSlice(self.allocator, ";3");
-        if (attrs.underline) try self.out_buf.appendSlice(self.allocator, ";4");
-        if (attrs.reverse) try self.out_buf.appendSlice(self.allocator, ";7");
-        if (attrs.hidden) try self.out_buf.appendSlice(self.allocator, ";8");
+        var buf: [64]u8 = undefined;
+        var len: usize = 0;
+
+        @memcpy(buf[len .. len + 3], "\x1b[0");
+        len += 3;
+
+        if (attrs.bold) {
+            @memcpy(buf[len .. len + 2], ";1");
+            len += 2;
+        }
+        if (attrs.dim) {
+            @memcpy(buf[len .. len + 2], ";2");
+            len += 2;
+        }
+        if (attrs.italic) {
+            @memcpy(buf[len .. len + 2], ";3");
+            len += 2;
+        }
+        if (attrs.underline) {
+            @memcpy(buf[len .. len + 2], ";4");
+            len += 2;
+        }
+        if (attrs.reverse) {
+            @memcpy(buf[len .. len + 2], ";7");
+            len += 2;
+        }
+        if (attrs.hidden) {
+            @memcpy(buf[len .. len + 2], ";8");
+            len += 2;
+        }
 
         switch (fg.type) {
             .default => {},
             .indexed => {
                 if (fg.r < 8) {
-                    try self.out_buf.print(self.allocator, ";{d}", .{30 + fg.r});
+                    if (std.fmt.bufPrint(buf[len..], ";{d}", .{30 + fg.r})) |s| len += s.len else |_| {}
                 } else if (fg.r < 16) {
-                    try self.out_buf.print(self.allocator, ";{d}", .{90 + fg.r - 8});
+                    if (std.fmt.bufPrint(buf[len..], ";{d}", .{90 + fg.r - 8})) |s| len += s.len else |_| {}
                 } else {
-                    try self.out_buf.print(self.allocator, ";38;5;{d}", .{fg.r});
+                    if (std.fmt.bufPrint(buf[len..], ";38;5;{d}", .{fg.r})) |s| len += s.len else |_| {}
                 }
             },
             .rgb => {
-                try self.out_buf.print(self.allocator, ";38;2;{d};{d};{d}", .{ fg.r, fg.g, fg.b });
+                if (std.fmt.bufPrint(buf[len..], ";38;2;{d};{d};{d}", .{ fg.r, fg.g, fg.b })) |s| len += s.len else |_| {}
             },
         }
 
@@ -411,18 +496,34 @@ pub const Renderer = struct {
             .default => {},
             .indexed => {
                 if (bg.r < 8) {
-                    try self.out_buf.print(self.allocator, ";{d}", .{40 + bg.r});
+                    if (std.fmt.bufPrint(buf[len..], ";{d}", .{40 + bg.r})) |s| len += s.len else |_| {}
                 } else if (bg.r < 16) {
-                    try self.out_buf.print(self.allocator, ";{d}", .{100 + bg.r - 8});
+                    if (std.fmt.bufPrint(buf[len..], ";{d}", .{100 + bg.r - 8})) |s| len += s.len else |_| {}
                 } else {
-                    try self.out_buf.print(self.allocator, ";48;5;{d}", .{bg.r});
+                    if (std.fmt.bufPrint(buf[len..], ";48;5;{d}", .{bg.r})) |s| len += s.len else |_| {}
                 }
             },
             .rgb => {
-                try self.out_buf.print(self.allocator, ";48;2;{d};{d};{d}", .{ bg.r, bg.g, bg.b });
+                if (std.fmt.bufPrint(buf[len..], ";48;2;{d};{d};{d}", .{ bg.r, bg.g, bg.b })) |s| len += s.len else |_| {}
             },
         }
 
-        try self.out_buf.append(self.allocator, 'm');
+        buf[len] = 'm';
+        len += 1;
+
+        try self.out_buf.appendSlice(self.allocator, buf[0..len]);
     }
 };
+
+test "renderer initialization, invalidation, and diff output" {
+    const testing = std.testing;
+    var rend = try Renderer.init(testing.allocator, 80, 24);
+    defer rend.deinit();
+
+    try testing.expectEqual(@as(u16, 80), rend.width);
+    try testing.expectEqual(@as(u16, 24), rend.height);
+
+    rend.invalidate();
+    try testing.expectEqual(@as(u16, 0xFFFF), rend.prev_cursor_x);
+    try testing.expectEqual(@as(u16, 0xFFFF), rend.prev_cursor_y);
+}

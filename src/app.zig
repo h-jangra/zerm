@@ -23,6 +23,12 @@ fn handleSigterm(_: posix.SIG) callconv(.c) void {
     sigterm_received.store(true, .monotonic);
 }
 
+fn getMilliTimestamp() i64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     cfg: config.Config,
@@ -113,8 +119,16 @@ pub const App = struct {
         }
     }
 
+    pub fn isTabBarVisible(self: *const App) bool {
+        return switch (self.cfg.theme.tab_bar_show) {
+            .always => true,
+            .never => false,
+            .auto => self.tabs.items.len > 1,
+        };
+    }
+
     pub fn getTabArea(self: *const App) tree_mod.Rect {
-        const tab_bar_h: u16 = if (self.tabs.items.len > 1) 1 else 0;
+        const tab_bar_h: u16 = if (self.isTabBarVisible()) 1 else 0;
         const h = if (self.term_height > tab_bar_h) self.term_height - tab_bar_h else 1;
         return .{
             .x = 0,
@@ -220,8 +234,10 @@ pub const App = struct {
         self.handleResize();
 
         var read_buf: [8192]u8 = undefined;
-        var pty_read_buf: [32768]u8 = undefined;
+        var pty_read_buf: [65536]u8 = undefined;
         var pollfds_buf: [64]posix.pollfd = undefined;
+        var last_render_time: i64 = getMilliTimestamp();
+        const FRAME_TIME_MS: i64 = 8; // ~125 FPS for ultra-smooth animations and instant responsiveness
 
         try self.renderer.render(self.tabs.items, self.active_tab_index, &self.cfg.theme);
         self.clearDirty();
@@ -266,23 +282,34 @@ pub const App = struct {
                 }
             }
 
-            const poll_timeout: i32 = if (self.isDirty()) 0 else 50;
-            _ = posix.poll(pollfds_buf[0..poll_count], poll_timeout) catch |err| {
+            const now = getMilliTimestamp();
+            const elapsed = now - last_render_time;
+            const poll_timeout: i32 = if (self.isDirty())
+                @intCast(@max(0, FRAME_TIME_MS - elapsed))
+            else
+                50;
+
+            const poll_res = posix.poll(pollfds_buf[0..poll_count], poll_timeout) catch |err| {
                 if (err == error.Interrupted) continue;
                 continue;
             };
 
+            var user_input_received = false;
+            var pty_output_received = false;
             if ((pollfds_buf[0].revents & posix.POLL.IN) != 0) {
                 const n_read = posix.system.read(posix.STDIN_FILENO, &read_buf, read_buf.len);
                 const n_val: isize = @bitCast(n_read);
                 if (n_val > 0) {
+                    user_input_received = true;
                     const input_slice = read_buf[0..@intCast(n_val)];
                     self.handleInput(input_slice);
 
                     if (self.active_tab_index < self.tabs.items.len) {
                         const tab = self.tabs.items[self.active_tab_index];
                         if (tab.getActivePane()) |pane| {
-                            _ = pane.readPtyOutput(&pty_read_buf);
+                            if (pane.readPtyOutput(&pty_read_buf)) {
+                                pty_output_received = true;
+                            }
                         }
                     }
                 }
@@ -300,7 +327,9 @@ pub const App = struct {
                     if (map.tab_idx < self.tabs.items.len) {
                         const tab = self.tabs.items[map.tab_idx];
                         if (tab.panes.get(map.pane_id)) |pane| {
-                            if (!pane.readPtyOutput(&pty_read_buf)) {
+                            if (pane.readPtyOutput(&pty_read_buf)) {
+                                pty_output_received = true;
+                            } else {
                                 if (dead_count < dead_panes.len) {
                                     dead_panes[dead_count] = map;
                                     dead_count += 1;
@@ -327,8 +356,13 @@ pub const App = struct {
             }
 
             if (self.isDirty()) {
-                try self.renderer.render(self.tabs.items, self.active_tab_index, &self.cfg.theme);
-                self.clearDirty();
+                const cur_time = getMilliTimestamp();
+                const cur_elapsed = cur_time - last_render_time;
+                if (user_input_received or pty_output_received or poll_res == 0 or cur_elapsed >= FRAME_TIME_MS or self.force_render) {
+                    try self.renderer.render(self.tabs.items, self.active_tab_index, &self.cfg.theme);
+                    self.clearDirty();
+                    last_render_time = cur_time;
+                }
             }
         }
     }
@@ -360,19 +394,14 @@ pub const App = struct {
                         idx = end_pos + 1;
                         continue;
                     }
-                } else if (idx + 1 < input.len) {
-                    const esc_seq = input[idx .. idx + 2];
-                    const parsed = input_mod.parseInput(esc_seq, &self.cfg);
-                    if (parsed == .action) {
-                        self.executeAction(parsed.action);
-                        idx += 2;
-                        continue;
-                    }
                 }
+                const parsed = input_mod.parseInput(input[idx .. idx + 1], &self.cfg);
+                self.dispatchParsedInput(parsed);
+                idx += 1;
+                continue;
             }
 
-            const single_byte = input[idx .. idx + 1];
-            const parsed = input_mod.parseInput(single_byte, &self.cfg);
+            const parsed = input_mod.parseInput(input[idx .. idx + 1], &self.cfg);
             self.dispatchParsedInput(parsed);
             idx += 1;
         }
@@ -451,7 +480,7 @@ pub const App = struct {
     }
 
     fn handleMouse(self: *App, m: input_mod.MouseEvent) void {
-        const tab_bar_h: u16 = if (self.tabs.items.len > 1) 1 else 0;
+        const tab_bar_h: u16 = if (self.isTabBarVisible()) 1 else 0;
 
         if (tab_bar_h > 0 and m.y == 1) {
             self.clearAllSelections();
@@ -467,20 +496,20 @@ pub const App = struct {
                 const sx = if (m.x > 0) m.x - 1 else 0;
                 const sy = if (m.y > 0) m.y - 1 else 0;
 
-                var leaves = std.ArrayList(*tree_mod.Node).empty;
-                defer leaves.deinit(self.allocator);
-                root.collectLeaves(&leaves, self.allocator) catch {};
+                var leaf_buf: [64]*tree_mod.Node = undefined;
+                var leaf_count: usize = 0;
+                root.collectLeavesSlice(&leaf_buf, &leaf_count);
 
                 var target_leaf: ?*tree_mod.Node = null;
-                for (leaves.items) |leaf| {
+                for (leaf_buf[0..leaf_count]) |leaf| {
                     if (leaf.rect.contains(sx, sy)) {
                         target_leaf = leaf;
                         break;
                     }
                 }
-                if (target_leaf == null and leaves.items.len > 0) {
+                if (target_leaf == null and leaf_count > 0) {
                     var min_dist: i32 = 999999;
-                    for (leaves.items) |leaf| {
+                    for (leaf_buf[0..leaf_count]) |leaf| {
                         const c = leaf.rect.center();
                         const dx = c.cx - @as(i32, sx);
                         const dy = c.cy - @as(i32, sy);
