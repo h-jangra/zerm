@@ -215,7 +215,7 @@ pub const VTerm = struct {
     alt_grid: []Cell,
     is_alt_screen: bool = false,
 
-    title: [128]u8 = [_]u8{0} ** 128,
+    title: [128]u8 = @splat(0),
     title_len: usize = 0,
 
     cursor_shape: u8 = 0,
@@ -226,23 +226,23 @@ pub const VTerm = struct {
 
     dirty: bool = true,
     bracketed_paste: bool = false,
-    reply_buf: [2048]u8 = [_]u8{0} ** 2048,
+    reply_buf: [2048]u8 = @splat(0),
     reply_len: usize = 0,
 
     state: ParserState = .ground,
-    csi_params: [16]i32 = [_]i32{0} ** 16,
-    csi_param_is_sub: [16]bool = [_]bool{false} ** 16,
+    csi_params: [16]i32 = @splat(0),
+    csi_param_is_sub: [16]bool = @splat(false),
     csi_param_count: usize = 0,
     csi_private: bool = false,
     csi_intermediate: u8 = 0,
 
-    osc_buf: [256]u8 = [_]u8{0} ** 256,
+    osc_buf: [256]u8 = @splat(0),
     osc_len: usize = 0,
 
-    dcs_buf: [256]u8 = [_]u8{0} ** 256,
+    dcs_buf: [256]u8 = @splat(0),
     dcs_len: usize = 0,
 
-    utf8_buf: [4]u8 = [_]u8{0} ** 4,
+    utf8_buf: [4]u8 = @splat(0),
     utf8_len: u8 = 0,
     utf8_expected: u8 = 0,
 
@@ -844,7 +844,7 @@ pub const VTerm = struct {
                 const rep = std.fmt.bufPrint(&buf, "\x1b[?{d};{c}$y", .{ p, status }) catch "";
                 self.appendReply(rep);
             } else {
-                const rep = std.fmt.bufPrint(&buf, "\x1b[{d};0$y", .{ p }) catch "";
+                const rep = std.fmt.bufPrint(&buf, "\x1b[{d};0$y", .{p}) catch "";
                 self.appendReply(rep);
             }
             return;

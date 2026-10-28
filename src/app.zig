@@ -132,7 +132,7 @@ pub const App = struct {
         const h = if (self.term_height > tab_bar_h) self.term_height - tab_bar_h else 1;
         return .{
             .x = 0,
-            .y = tab_bar_h,
+            .y = 0,
             .width = self.term_width,
             .height = h,
         };
@@ -482,7 +482,7 @@ pub const App = struct {
     fn handleMouse(self: *App, m: input_mod.MouseEvent) void {
         const tab_bar_h: u16 = if (self.isTabBarVisible()) 1 else 0;
 
-        if (tab_bar_h > 0 and m.y == 1) {
+        if (tab_bar_h > 0 and m.y == self.term_height) {
             self.clearAllSelections();
             if (!m.release and (m.btn & 3) == 0) {
                 self.handleTabBarClick(m.x);

@@ -42,7 +42,7 @@ zig build
 ./zig-out/bin/zerm
 ```
 
-Requires **Zig 0.14+** and Linux/Unix.
+Requires **Zig 0.17+** and Linux/Unix.
 
 ## License
 

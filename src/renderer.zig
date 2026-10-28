@@ -16,7 +16,7 @@ pub const Renderer = struct {
     prev_cursor_x: u16 = 0xFFFF,
     prev_cursor_y: u16 = 0xFFFF,
     prev_cursor_visible: bool = true,
-    prev_title: [128]u8 = [_]u8{0} ** 128,
+    prev_title: [128]u8 = @splat(0),
     prev_title_len: usize = 0xFFFF,
 
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Renderer {
@@ -43,7 +43,7 @@ pub const Renderer = struct {
             .prev_cursor_x = 0xFFFF,
             .prev_cursor_y = 0xFFFF,
             .prev_cursor_visible = true,
-            .prev_title = [_]u8{0} ** 128,
+            .prev_title = @splat(0),
             .prev_title_len = 0xFFFF,
         };
     }
@@ -102,10 +102,6 @@ pub const Renderer = struct {
         };
         const tab_bar_h: u16 = if (tab_bar_visible) 1 else 0;
 
-        if (tab_bar_visible) {
-            self.renderTabBar(tabs, active_tab_idx, theme);
-        }
-
         var leaf_buf: [64]*tree_mod.Node = undefined;
         var leaf_count: usize = 0;
         if (active_tab.root) |r| {
@@ -124,16 +120,23 @@ pub const Renderer = struct {
             }
         }
 
+        if (tab_bar_visible) {
+            self.renderTabBar(tabs, active_tab_idx, theme);
+        }
+
         try self.flushDiff(active_tab, tab_bar_h);
     }
 
     fn renderTabBar(self: *Renderer, tabs: []*tab_mod.Tab, active_tab_idx: usize, theme: *const config.Theme) void {
+        if (self.height == 0) return;
+
         var x: u16 = 0;
         const max_x = self.width;
+        const row_offset = @as(usize, self.height - 1) * self.width;
 
         var bx: u16 = 0;
         while (bx < max_x) : (bx += 1) {
-            self.back[bx] = .{
+            self.back[row_offset + bx] = .{
                 .char = ' ',
                 .fg = theme.tab_inactive_fg,
                 .bg = theme.tab_bar_bg,
@@ -154,13 +157,13 @@ pub const Renderer = struct {
             const label = config.formatTabLabel(fmt_pattern, i + 1, title, is_active, &label_buf);
 
             if (x > 0 and x < max_x) {
-                self.back[x] = .{ .char = ' ', .bg = theme.tab_bar_bg };
+                self.back[row_offset + x] = .{ .char = ' ', .bg = theme.tab_bar_bg };
                 x += 1;
             }
 
             for (label) |ch| {
                 if (x >= max_x) break;
-                self.back[x] = .{
+                self.back[row_offset + x] = .{
                     .char = ch,
                     .fg = fg,
                     .bg = bg,

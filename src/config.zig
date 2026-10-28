@@ -86,22 +86,22 @@ pub const TabBarShow = enum {
 
 pub const Theme = struct {
     tab_bar_show: TabBarShow = .auto,
-    tab_format: [64]u8 = [_]u8{0} ** 64,
+    tab_format: [64]u8 = @splat(0),
     tab_format_len: usize = 0,
 
-    tab_active_format: [64]u8 = [_]u8{0} ** 64,
+    tab_active_format: [64]u8 = @splat(0),
     tab_active_format_len: usize = 0,
 
-    tab_inactive_format: [64]u8 = [_]u8{0} ** 64,
+    tab_inactive_format: [64]u8 = @splat(0),
     tab_inactive_format_len: usize = 0,
 
-    tab_bar_bg: vterm_mod.Color = vterm_mod.Color.indexed(235),
-    tab_active_bg: vterm_mod.Color = vterm_mod.Color.indexed(33),
-    tab_active_fg: vterm_mod.Color = vterm_mod.Color.indexed(255),
+    tab_bar_bg: vterm_mod.Color = vterm_mod.Color.defaultColor(),
+    tab_active_bg: vterm_mod.Color = vterm_mod.Color.defaultColor(),
+    tab_active_fg: vterm_mod.Color = vterm_mod.Color.rgb(0x81, 0xA1, 0xC1),
     tab_active_bold: bool = true,
 
-    tab_inactive_bg: vterm_mod.Color = vterm_mod.Color.indexed(238),
-    tab_inactive_fg: vterm_mod.Color = vterm_mod.Color.indexed(250),
+    tab_inactive_bg: vterm_mod.Color = vterm_mod.Color.defaultColor(),
+    tab_inactive_fg: vterm_mod.Color = vterm_mod.Color.rgb(0x81, 0xA1, 0xC1),
     tab_inactive_bold: bool = false,
 
     border_active_fg: vterm_mod.Color = vterm_mod.Color.indexed(33),
@@ -113,7 +113,7 @@ pub const Theme = struct {
 
     pub fn initDefault() Theme {
         var t = Theme{};
-        const def_fmt = " [{index} {title}] ";
+        const def_fmt = "{title}";
         @memcpy(t.tab_format[0..def_fmt.len], def_fmt);
         t.tab_format_len = def_fmt.len;
         return t;
@@ -140,18 +140,18 @@ pub const Theme = struct {
     pub fn getActiveTabFormat(self: *const Theme) []const u8 {
         if (self.tab_active_format_len > 0) return self.tab_active_format[0..self.tab_active_format_len];
         if (self.tab_format_len > 0) return self.tab_format[0..self.tab_format_len];
-        return " [{index} {title}] ";
+        return "{title}";
     }
 
     pub fn getInactiveTabFormat(self: *const Theme) []const u8 {
         if (self.tab_inactive_format_len > 0) return self.tab_inactive_format[0..self.tab_inactive_format_len];
         if (self.tab_format_len > 0) return self.tab_format[0..self.tab_format_len];
-        return " [{index} {title}] ";
+        return "{title}";
     }
 
     pub fn getTabFormat(self: *const Theme) []const u8 {
         if (self.tab_format_len > 0) return self.tab_format[0..self.tab_format_len];
-        return " [{index} {title}] ";
+        return "{title}";
     }
 };
 
@@ -280,17 +280,17 @@ pub const default_ini_content =
     \\# show = auto
     \\# Tab title format: use {index}, {title}, {flags} or tmux-style #I, #W, #F
     \\# Enclose in quotes (single '...' or double "...") to preserve exact spacing and padding
-    \\format = " [{index} {title}] "
+    \\format = "{title}"
     \\# Optional: separate format for active and inactive tabs (tmux-style)
-    \\# active_format = " [{index} {title}] "
-    \\# inactive_format = "  {index} {title}  "
+    \\# active_format = "{title}"
+    \\# inactive_format = "{title}"
     \\# Colors: default / transparent / none, 0-255 (256-color index), #RRGGBB (hex), or standard color name
-    \\tab_bar_bg = 235
-    \\active_bg = 33
-    \\active_fg = 255
+    \\tab_bar_bg = transparent
+    \\active_bg = transparent
+    \\active_fg = #81A1C1
     \\active_bold = true
-    \\inactive_bg = 238
-    \\inactive_fg = 250
+    \\inactive_bg = transparent
+    \\inactive_fg = #81A1C1
     \\inactive_bold = false
     \\
     \\[borders]
@@ -620,10 +620,10 @@ pub fn loadConfigFile(allocator: std.mem.Allocator) Config {
     var path_slice: ?[:0]const u8 = null;
 
     if (getEnv("XDG_CONFIG_HOME")) |xdg| {
-        const p = std.fmt.bufPrintZ(&path_buf, "{s}/zerm/zerm.ini", .{xdg}) catch null;
+        const p = std.mem.printSentinel(&path_buf, "{s}/zerm/zerm.ini", .{xdg}, 0) catch null;
         if (p) |res| path_slice = res;
     } else if (getEnv("HOME")) |home| {
-        const p = std.fmt.bufPrintZ(&path_buf, "{s}/.config/zerm/zerm.ini", .{home}) catch null;
+        const p = std.mem.printSentinel(&path_buf, "{s}/.config/zerm/zerm.ini", .{home}, 0) catch null;
         if (p) |res| path_slice = res;
     }
 

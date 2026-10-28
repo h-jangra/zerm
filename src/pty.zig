@@ -28,7 +28,7 @@ pub const Pty = struct {
             if (@as(isize, @bitCast(gptn_res)) != 0) return error.PtyError;
 
             var pts_path: [64:0]u8 = undefined;
-            const path = try std.fmt.bufPrintZ(&pts_path, "/dev/pts/{d}", .{ptn});
+            const path = try std.mem.printSentinel(&pts_path, "/dev/pts/{d}", .{ptn}, 0);
             slave = try posix.openatZ(posix.AT.FDCWD, path, .{ .ACCMODE = .RDWR, .NOCTTY = true }, 0);
         }
         defer _ = posix.system.close(slave);
@@ -155,10 +155,10 @@ pub const Pty = struct {
 
     pub fn checkAlive(self: *Pty) bool {
         if (!self.is_alive) return false;
-        var status: u32 = 0;
+        var status: i32 = 0;
         const res = linux.waitpid(self.pid, &status, posix.W.NOHANG);
         const res_val: isize = @bitCast(res);
-        if (res_val > 0 or res_val == -@as(isize, @intFromEnum(linux.E.CHILD))) {
+        if (res_val > 0 or res_val == -@as(isize, @backingInt(linux.E.CHILD))) {
             self.is_alive = false;
             return false;
         }
@@ -168,7 +168,7 @@ pub const Pty = struct {
     pub fn deinit(self: *Pty) void {
         if (self.is_alive) {
             _ = linux.kill(self.pid, linux.SIG.TERM);
-            var status: u32 = 0;
+            var status: i32 = 0;
             _ = linux.waitpid(self.pid, &status, posix.W.NOHANG);
             self.is_alive = false;
         }

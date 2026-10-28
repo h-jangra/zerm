@@ -2,7 +2,7 @@
     .name = .zerm,
     .version = "0.1.0",
     .fingerprint = 0x45d090bed8d0ff7a,
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",
