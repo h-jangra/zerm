@@ -19,16 +19,24 @@ It focuses on a simple, modern workflow with **tabs and splits** — without ses
 
 ## Keybindings
 
-| Action           | Key                |
-| ---------------- | ------------------ |
-| New tab          | `Ctrl+Shift+T`     |
-| Close pane       | `Ctrl+Shift+W`     |
-| Next tab         | `Ctrl+Shift+N`     |
-| Previous tab     | `Ctrl+Shift+P`     |
-| Vertical split   | `Ctrl+Shift+Enter` |
-| Horizontal split | `Alt+Shift+Enter`  |
-| Navigate panes   | `Ctrl+Shift+Arrow` |
-| Resize panes     | `Alt+Shift+Arrow`  |
+| Action           | Key                          |
+| ---------------- | ---------------------------- |
+| New tab          | `Ctrl+Shift+T` / `Alt+T`     |
+| Close pane       | `Ctrl+Shift+W` / `Alt+W`     |
+| Next tab         | `Ctrl+Tab` / `Alt+N`         |
+| Previous tab     | `Ctrl+Shift+Tab` / `Alt+P`   |
+| Vertical split   | `Ctrl+Shift+Enter` / `Alt+V` |
+| Horizontal split | `Ctrl+Shift+D` / `Alt+D`     |
+| Navigate panes   | `Alt+Arrow` / `Alt+HJKL`     |
+| Resize panes     | `Alt+Shift+Arrow`            |
+
+New tabs and splits open in the working directory of the focused pane. Keys
+that have no legacy encoding (such as `Shift+Enter` and `Ctrl+Tab`) are
+forwarded to applications using the keyboard protocol they requested, so
+`Shift+Enter` inserts a newline in TUI apps.
+
+Closing a pane or tab that is running a full-screen app (opencode, nvim, htop,
+...) asks for confirmation first. Closing an idle shell does not.
 
 ## Build
 

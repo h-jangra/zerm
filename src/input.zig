@@ -8,14 +8,33 @@ pub const MouseEvent = struct {
     release: bool,
 };
 
+/// Keyboard encoding negotiated by the application running inside a pane.
+/// Terminals (and multiplexers) use this to decide how to forward keys that
+/// only exist in an extended encoding (Shift+Enter, Ctrl+Tab, ...).
+pub const KeyProtocol = enum {
+    legacy,
+    modify_other_keys,
+    kitty,
+};
+
+pub const EscapeSequence = struct {
+    buf: [16]u8 = undefined,
+    len: usize = 0,
+
+    pub fn slice(self: *const EscapeSequence) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
 pub const InputResult = union(enum) {
     action: config.Action,
     mouse: MouseEvent,
     raw: []const u8,
     single_byte: u8,
+    sequence: EscapeSequence,
 };
 
-pub fn parseInput(bytes: []const u8, cfg: *const config.Config) InputResult {
+pub fn parseInput(bytes: []const u8, cfg: *const config.Config, protocol: KeyProtocol) InputResult {
     if (bytes.len == 0) return .{ .raw = bytes };
 
     if (parseSgrMouse(bytes)) |mouse_ev| {
@@ -26,12 +45,247 @@ pub fn parseInput(bytes: []const u8, cfg: *const config.Config) InputResult {
         if (cfg.getAction(chord)) |act| {
             return .{ .action = act };
         }
+        if (encodeExtendedKey(chord, protocol)) |seq| {
+            return .{ .sequence = seq };
+        }
         if (chordToLegacy(chord)) |legacy_byte| {
             return .{ .single_byte = legacy_byte };
         }
     }
 
+    // Applies to keys zerm has no KeyCode for (Home/End/Insert/Delete): strip
+    // the explicit "no modifier" (1) that modifyOtherKeys/kitty terminals put
+    // in the sequence, because shell line editors only know the legacy forms.
+    if (normalizeFunctionKey(bytes)) |seq| {
+        return .{ .sequence = seq };
+    }
+
     return .{ .raw = bytes };
+}
+
+const Param = struct {
+    value: u32,
+    event: u32 = 1,
+};
+
+fn parseParam(tok: []const u8) ?Param {
+    var it = std.mem.splitScalar(u8, tok, ':');
+    const head = it.next() orelse return null;
+    if (head.len == 0) return null;
+    const value = std.fmt.parseInt(u32, head, 10) catch return null;
+    var event: u32 = 1;
+    if (it.next()) |ev| {
+        event = std.fmt.parseInt(u32, ev, 10) catch 1;
+    }
+    return .{ .value = value, .event = event };
+}
+
+/// Decode a modifier parameter into a key chord. The kitty keyboard protocol
+/// adds CapsLock (64) and NumLock (128) to the modifier parameter; those bits
+/// must not be mistaken for Ctrl/Alt/Shift, otherwise a plain arrow with
+/// NumLock on becomes Alt+Arrow (and unknown sequences get forwarded raw to
+/// the pane, where readline mangles them into literal text like "9A").
+fn chordFromMods(mod: u32, code: config.KeyCode) config.KeyChord {
+    const bits: u32 = if (mod > 0) (mod - 1) & 0x7 else 0;
+    return .{
+        .shift = (bits & 1) != 0,
+        .alt = (bits & 2) != 0,
+        .ctrl = (bits & 4) != 0,
+        .code = code,
+    };
+}
+
+/// Map a kitty/modifyOtherKeys codepoint to a KeyCode we know about.
+fn codepointToKeyCode(code: u32) ?config.KeyCode {
+    return switch (code) {
+        13 => .enter,
+        9 => .tab,
+        27 => .escape,
+        127, 8 => .backspace,
+        // Kitty functional key codes for the cursor blocks.
+        57350 => .left,
+        57351 => .right,
+        57352 => .up,
+        57353 => .down,
+        57354 => .page_up,
+        57355 => .page_down,
+        else => blk: {
+            if (code >= 'a' and code <= 'z') break :blk .{ .char = @intCast(code) };
+            if (code >= 'A' and code <= 'Z') break :blk .{ .char = std.ascii.toLower(@intCast(code)) };
+            if (code >= '0' and code <= '9') break :blk .{ .char = @intCast(code) };
+            if (code == 32) break :blk .{ .char = ' ' };
+            break :blk null;
+        },
+    };
+}
+
+const FuncKey = enum { home, end, insert, delete };
+
+/// Normalize Home/End/Insert/Delete to the legacy xterm encodings that shell
+/// line editors understand. Handles xterm (CSI H/F, CSI n~) and kitty
+/// (CSI 57348...u) forms, with or without lock bits in the modifier.
+fn normalizeFunctionKey(bytes: []const u8) ?EscapeSequence {
+    if (bytes.len < 3 or bytes[0] != 0x1b or bytes[1] != '[') return null;
+
+    const final = bytes[bytes.len - 1];
+    const inner = bytes[2 .. bytes.len - 1];
+    if (final != 'H' and final != 'F' and final != '~' and final != 'u') return null;
+
+    var it = std.mem.splitScalar(u8, inner, ';');
+    var key: FuncKey = undefined;
+    var mod: Param = .{ .value = 1 };
+
+    switch (final) {
+        'H', 'F' => {
+            const first = it.next() orelse "";
+            if (first.len != 0 and !std.mem.eql(u8, first, "1")) return null;
+            if (it.next()) |m| mod = parseParam(m) orelse return null;
+            key = if (final == 'H') .home else .end;
+        },
+        '~' => {
+            const code = parseParam(it.next() orelse "") orelse return null;
+            if (it.next()) |m| mod = parseParam(m) orelse return null;
+            key = switch (code.value) {
+                1, 7 => .home,
+                4, 8 => .end,
+                2 => .insert,
+                3 => .delete,
+                else => return null,
+            };
+        },
+        'u' => {
+            const code = parseParam(it.next() orelse "") orelse return null;
+            if (it.next()) |m| mod = parseParam(m) orelse return null;
+            key = switch (code.value) {
+                57348 => .insert,
+                57349 => .delete,
+                57356 => .home,
+                57357 => .end,
+                else => return null,
+            };
+        },
+        else => return null,
+    }
+
+    if (mod.event == 3) return null;
+
+    const bits: u32 = if (mod.value > 0) (mod.value - 1) & 0x7 else 0;
+    var seq = EscapeSequence{};
+    if (bits == 0) {
+        const base = switch (key) {
+            .home => "\x1b[H",
+            .end => "\x1b[F",
+            .insert => "\x1b[2~",
+            .delete => "\x1b[3~",
+        };
+        @memcpy(seq.buf[0..base.len], base);
+        seq.len = base.len;
+        return seq;
+    }
+
+    const m = bits + 1;
+    seq.len = switch (key) {
+        .home => (std.fmt.bufPrint(&seq.buf, "\x1b[1;{d}H", .{m}) catch return null).len,
+        .end => (std.fmt.bufPrint(&seq.buf, "\x1b[1;{d}F", .{m}) catch return null).len,
+        .insert => (std.fmt.bufPrint(&seq.buf, "\x1b[2;{d}~", .{m}) catch return null).len,
+        .delete => (std.fmt.bufPrint(&seq.buf, "\x1b[3;{d}~", .{m}) catch return null).len,
+    };
+    return seq;
+}
+
+/// Encode keys that have no legacy encoding into the protocol the application
+/// inside the pane asked for. This is what makes Shift+Enter insert a newline
+/// in TUI apps (opencode, etc.) while keeping the plain shell unaffected.
+fn encodeExtendedKey(chord: config.KeyChord, protocol: KeyProtocol) ?EscapeSequence {
+    const mod: u8 = 1 +
+        @as(u8, @intFromBool(chord.shift)) +
+        @as(u8, @intFromBool(chord.alt)) * 2 +
+        @as(u8, @intFromBool(chord.ctrl)) * 4;
+
+    switch (chord.code) {
+        .enter => {
+            // Plain Enter is always a carriage return.
+            if (!chord.shift and !chord.ctrl and !chord.alt) return null;
+            // Without a negotiated extended protocol fall back to legacy
+            // handling (Shift+Enter behaves like plain Enter).
+            if (protocol == .legacy) return null;
+            var seq = EscapeSequence{};
+            if (protocol == .kitty) {
+                seq.len = (std.fmt.bufPrint(&seq.buf, "\x1b[13;{d}u", .{mod}) catch return null).len;
+            } else {
+                seq.len = (std.fmt.bufPrint(&seq.buf, "\x1b[27;{d};13~", .{mod}) catch return null).len;
+            }
+            return seq;
+        },
+        .tab => {
+            // Shift+Tab has a universal legacy encoding (backtab).
+            if (chord.shift and !chord.ctrl and !chord.alt) {
+                var seq = EscapeSequence{};
+                @memcpy(seq.buf[0..3], "\x1b[Z");
+                seq.len = 3;
+                return seq;
+            }
+            if (protocol == .legacy or !chord.ctrl) return null;
+            var seq = EscapeSequence{};
+            if (protocol == .kitty) {
+                seq.len = (std.fmt.bufPrint(&seq.buf, "\x1b[9;{d}u", .{mod}) catch return null).len;
+            } else {
+                seq.len = (std.fmt.bufPrint(&seq.buf, "\x1b[27;{d};9~", .{mod}) catch return null).len;
+            }
+            return seq;
+        },
+        // Terminals that negotiate modifyOtherKeys/kitty report even
+        // unmodified cursor keys with an explicit "1" modifier
+        // (CSI 1;1A). Readline and other line editors only understand the
+        // legacy forms, so normalize unmodified keys back to them.
+        .up, .down, .left, .right => {
+            const final: u8 = switch (chord.code) {
+                .up => 'A',
+                .down => 'B',
+                .right => 'C',
+                .left => 'D',
+                else => unreachable,
+            };
+            var seq = EscapeSequence{};
+            if (!chord.shift and !chord.alt and !chord.ctrl) {
+                seq.buf[0] = 0x1b;
+                seq.buf[1] = '[';
+                seq.buf[2] = final;
+                seq.len = 3;
+            } else {
+                seq.len = (std.fmt.bufPrint(&seq.buf, "\x1b[1;{d}{c}", .{ mod, final }) catch return null).len;
+            }
+            return seq;
+        },
+        .page_up, .page_down => {
+            const code: u8 = switch (chord.code) {
+                .page_up => 5,
+                .page_down => 6,
+                else => unreachable,
+            };
+            var seq = EscapeSequence{};
+            if (!chord.shift and !chord.alt and !chord.ctrl) {
+                seq.len = (std.fmt.bufPrint(&seq.buf, "\x1b[{d}~", .{code}) catch return null).len;
+            } else {
+                seq.len = (std.fmt.bufPrint(&seq.buf, "\x1b[{d};{d}~", .{ code, mod }) catch return null).len;
+            }
+            return seq;
+        },
+        .char => |c| {
+            // Alt+<printable> is an ESC prefix in the legacy encoding. Kitty
+            // terminals report it as CSI <code>;3u, which readline would just
+            // print verbatim.
+            if (chord.alt and !chord.ctrl and c >= 0x20 and c <= 0x7e) {
+                var seq = EscapeSequence{};
+                seq.buf[0] = 0x1b;
+                seq.buf[1] = if (chord.shift) std.ascii.toUpper(c) else c;
+                seq.len = 2;
+                return seq;
+            }
+            return null;
+        },
+        else => return null,
+    }
 }
 
 pub fn chordToLegacy(chord: config.KeyChord) ?u8 {
@@ -65,7 +319,10 @@ pub fn chordToLegacy(chord: config.KeyChord) ?u8 {
             }
         } else if (!chord.ctrl and chord.shift) {
             switch (chord.code) {
-                .char => |c| return c,
+                .char => |c| {
+                    if (c >= 'a' and c <= 'z') return c - 'a' + 'A';
+                    return c;
+                },
                 .enter => return '\r',
                 else => {},
             }
@@ -100,178 +357,75 @@ pub fn parseSgrMouse(bytes: []const u8) ?MouseEvent {
 pub fn extractChord(bytes: []const u8) ?config.KeyChord {
     if (bytes.len == 0) return null;
 
-    if (bytes.len >= 5 and bytes[0] == 0x1b and bytes[1] == '[' and bytes[bytes.len - 1] == 'u') {
-        const inner = bytes[2 .. bytes.len - 1];
-        var it = std.mem.splitScalar(u8, inner, ';');
-        const code_part = it.next() orelse "";
-        const mod_part = it.next() orelse "1";
-
-        var code_tok_it = std.mem.splitScalar(u8, code_part, ':');
-        const code_str = code_tok_it.next() orelse "";
-        const code = std.fmt.parseInt(u32, code_str, 10) catch return null;
-
-        var mod_tok_it = std.mem.splitScalar(u8, mod_part, ':');
-        const mod_str = mod_tok_it.next() orelse "1";
-        const event_str = mod_tok_it.next();
-        // If event type is 3 (key release), ignore it so actions only trigger once on key press
-        if (event_str) |ev| {
-            if (std.mem.eql(u8, ev, "3")) return null;
-        }
-
-        const mod = std.fmt.parseInt(u32, mod_str, 10) catch 1;
-        const effective_mod = if (mod > 0) mod - 1 else 0;
-        const shift = (effective_mod & 1) != 0;
-        const alt = (effective_mod & 2) != 0;
-        const ctrl = (effective_mod & 4) != 0;
-
-        const kcode: ?config.KeyCode = blk: {
-            if (code == 13) break :blk .enter;
-            if (code == 9) break :blk .tab;
-            if (code == 27) break :blk .escape;
-            if (code == 127 or code == 8) break :blk .backspace;
-            if (code == 57358) break :blk .up;
-            if (code == 57359) break :blk .down;
-            if (code == 57360) break :blk .left;
-            if (code == 57361) break :blk .right;
-            if (code == 57362) break :blk .page_up;
-            if (code == 57363) break :blk .page_down;
-            if (code >= 'a' and code <= 'z') break :blk .{ .char = @intCast(code) };
-            if (code >= 'A' and code <= 'Z') break :blk .{ .char = std.ascii.toLower(@intCast(code)) };
-            if (code >= '0' and code <= '9') break :blk .{ .char = @intCast(code) };
-            if (code == 32) break :blk .{ .char = ' ' };
-            break :blk null;
-        };
-
-        if (kcode) |kc| {
-            return config.KeyChord{
-                .ctrl = ctrl,
-                .shift = shift,
-                .alt = alt,
-                .code = kc,
-            };
+    // Terminals configured to send ESC for Alt prefix Alt+<key> with an extra
+    // ESC, e.g. Alt+Left arrives as ESC ESC [ D.
+    if (bytes.len >= 4 and bytes[0] == 0x1b and bytes[1] == 0x1b and bytes[2] == '[') {
+        if (extractChord(bytes[1..])) |inner| {
+            var chord = inner;
+            chord.alt = true;
+            return chord;
         }
     }
 
+    // xterm modifyOtherKeys: CSI 27 ; modifiers ; codepoint ~
     if (bytes.len >= 7 and std.mem.startsWith(u8, bytes, "\x1b[27;") and bytes[bytes.len - 1] == '~') {
         const inner = bytes[5 .. bytes.len - 1];
         var it = std.mem.splitScalar(u8, inner, ';');
-        const mod_part = it.next() orelse "";
-        const code_part = it.next() orelse "";
-
-        var mod_tok_it = std.mem.splitScalar(u8, mod_part, ':');
-        const mod_str = mod_tok_it.next() orelse "1";
-        const mod = std.fmt.parseInt(u32, mod_str, 10) catch 1;
-
-        var code_tok_it = std.mem.splitScalar(u8, code_part, ':');
-        const code_str = code_tok_it.next() orelse "";
-        const code = std.fmt.parseInt(u32, code_str, 10) catch return null;
-
-        const effective_mod = if (mod > 0) mod - 1 else 0;
-        const shift = (effective_mod & 1) != 0;
-        const alt = (effective_mod & 2) != 0;
-        const ctrl = (effective_mod & 4) != 0;
-
-        const kcode: ?config.KeyCode = blk: {
-            if (code == 13) break :blk .enter;
-            if (code == 9) break :blk .tab;
-            if (code == 27) break :blk .escape;
-            if (code == 127 or code == 8) break :blk .backspace;
-            if (code >= 'a' and code <= 'z') break :blk .{ .char = @intCast(code) };
-            if (code >= 'A' and code <= 'Z') break :blk .{ .char = std.ascii.toLower(@intCast(code)) };
-            if (code >= '0' and code <= '9') break :blk .{ .char = @intCast(code) };
-            if (code == 32) break :blk .{ .char = ' ' };
-            break :blk null;
-        };
-
-        if (kcode) |kc| {
-            return config.KeyChord{
-                .ctrl = ctrl,
-                .shift = shift,
-                .alt = alt,
-                .code = kc,
-            };
+        const mod = parseParam(it.next() orelse "") orelse return null;
+        const code = parseParam(it.next() orelse "") orelse return null;
+        if (mod.event == 3) return null;
+        if (codepointToKeyCode(code.value)) |kc| {
+            return chordFromMods(mod.value, kc);
         }
     }
 
-    if (bytes.len == 6 and std.mem.startsWith(u8, bytes, "\x1b[1;")) {
-        const mod_char = bytes[4];
-        const dir_char = bytes[5];
-        const mod = mod_char - '0';
-        const effective_mod = if (mod > 0) mod - 1 else 0;
-
-        const shift = (effective_mod & 1) != 0;
-        const alt = (effective_mod & 2) != 0;
-        const ctrl = (effective_mod & 4) != 0;
-
-        const kcode: ?config.KeyCode = switch (dir_char) {
-            'A' => .up,
-            'B' => .down,
-            'C' => .right,
-            'D' => .left,
-            else => null,
-        };
-
-        if (kcode) |kc| {
-            return config.KeyChord{
-                .ctrl = ctrl,
-                .shift = shift,
-                .alt = alt,
-                .code = kc,
-            };
-        }
-    }
-
-    if (bytes.len >= 5 and bytes[0] == 0x1b and bytes[1] == '[' and bytes[bytes.len - 1] == '~' and std.mem.indexOfScalar(u8, bytes, ';') != null) {
+    // Extended encodings shared by kitty (CSI ... u) and xterm
+    // (CSI ... ~, CSI 1 ; mods A-D). Modifier parameters can be multi-digit
+    // because they include CapsLock (64) and NumLock (128) bits; lock bits
+    // are stripped in chordFromMods.
+    if (bytes.len >= 3 and bytes[0] == 0x1b and bytes[1] == '[') {
+        const final = bytes[bytes.len - 1];
         const inner = bytes[2 .. bytes.len - 1];
-        var it = std.mem.splitScalar(u8, inner, ';');
-        const code_part = it.next() orelse "";
-        const mod_part = it.next() orelse "1";
 
-        var code_tok_it = std.mem.splitScalar(u8, code_part, ':');
-        const code_str = code_tok_it.next() orelse "";
-        const code = std.fmt.parseInt(u32, code_str, 10) catch return null;
-
-        var mod_tok_it = std.mem.splitScalar(u8, mod_part, ':');
-        const mod_str = mod_tok_it.next() orelse "1";
-        const mod = std.fmt.parseInt(u32, mod_str, 10) catch 1;
-
-        const effective_mod = if (mod > 0) mod - 1 else 0;
-        const shift = (effective_mod & 1) != 0;
-        const alt = (effective_mod & 2) != 0;
-        const ctrl = (effective_mod & 4) != 0;
-
-        const kcode: ?config.KeyCode = blk: {
-            if (code == 13) break :blk .enter;
-            if (code == 9) break :blk .tab;
-            if (code == 27) break :blk .escape;
-            if (code == 127 or code == 8) break :blk .backspace;
-            if (code == 5) break :blk .page_up;
-            if (code == 6) break :blk .page_down;
-            if (code >= 'a' and code <= 'z') break :blk .{ .char = @intCast(code) };
-            if (code >= 'A' and code <= 'Z') break :blk .{ .char = std.ascii.toLower(@intCast(code)) };
-            if (code >= '0' and code <= '9') break :blk .{ .char = @intCast(code) };
-            if (code == 32) break :blk .{ .char = ' ' };
-            break :blk null;
-        };
-
-        if (kcode) |kc| {
-            return config.KeyChord{
-                .ctrl = ctrl,
-                .shift = shift,
-                .alt = alt,
-                .code = kc,
-            };
+        switch (final) {
+            'u' => {
+                var it = std.mem.splitScalar(u8, inner, ';');
+                const code = parseParam(it.next() orelse "") orelse return null;
+                const mod = if (it.next()) |m| (parseParam(m) orelse return null) else Param{ .value = 1 };
+                if (mod.event == 3) return null;
+                if (codepointToKeyCode(code.value)) |kc| {
+                    return chordFromMods(mod.value, kc);
+                }
+            },
+            'A', 'B', 'C', 'D' => {
+                var it = std.mem.splitScalar(u8, inner, ';');
+                const first = it.next() orelse "";
+                if (first.len != 0 and !std.mem.eql(u8, first, "1")) return null;
+                const mod = if (it.next()) |m| (parseParam(m) orelse return null) else Param{ .value = 1 };
+                if (mod.event == 3) return null;
+                const kc: config.KeyCode = switch (final) {
+                    'A' => .up,
+                    'B' => .down,
+                    'C' => .right,
+                    'D' => .left,
+                    else => unreachable,
+                };
+                return chordFromMods(mod.value, kc);
+            },
+            '~' => {
+                var it = std.mem.splitScalar(u8, inner, ';');
+                const code = parseParam(it.next() orelse "") orelse return null;
+                const mod = if (it.next()) |m| (parseParam(m) orelse return null) else Param{ .value = 1 };
+                if (mod.event == 3) return null;
+                const kc: ?config.KeyCode = switch (code.value) {
+                    5 => .page_up,
+                    6 => .page_down,
+                    else => codepointToKeyCode(code.value),
+                };
+                if (kc) |k| return chordFromMods(mod.value, k);
+            },
+            else => {},
         }
-    }
-
-    if (bytes.len >= 4 and bytes[0] == 0x1b and bytes[1] == '[' and (bytes[2] == '5' or bytes[2] == '6') and bytes[3] == '~') {
-        const is_pgup = (bytes[2] == '5');
-        return config.KeyChord{
-            .ctrl = false,
-            .shift = false,
-            .alt = false,
-            .code = if (is_pgup) .page_up else .page_down,
-        };
     }
 
     if (bytes.len == 3 and bytes[0] == 0x1b and bytes[1] == 0x1b and (bytes[2] == '\r' or bytes[2] == '\n')) {
@@ -289,6 +443,13 @@ pub fn extractChord(bytes: []const u8) ?config.KeyChord {
             .shift = false,
             .alt = true,
             .code = .enter,
+        };
+    }
+
+    if (bytes.len == 3 and bytes[0] == 0x1b and bytes[1] == '[' and bytes[2] == 'Z') {
+        return config.KeyChord{
+            .shift = true,
+            .code = .tab,
         };
     }
 
@@ -319,58 +480,236 @@ test "input parse chord and actions" {
     var cfg = config.Config.init(testing.allocator);
     defer cfg.deinit();
 
-    const res_cst = parseInput("\x1b[116;6u", &cfg);
+    const res_cst = parseInput("\x1b[116;6u", &cfg, .legacy);
     try testing.expectEqual(config.Action.new_tab, res_cst.action);
 
-    const res_aw = parseInput("\x1bw", &cfg);
+    const res_aw = parseInput("\x1bw", &cfg, .legacy);
     try testing.expectEqual(config.Action.close_pane, res_aw.action);
 
-    const res_hsplit = parseInput("\x1b[13;4u", &cfg);
+    const res_hsplit = parseInput("\x1b[13;4u", &cfg, .legacy);
     try testing.expectEqual(config.Action.split_horizontal, res_hsplit.action);
 
-    const res_hsplit2 = parseInput("\x1b\x1b\r", &cfg);
+    const res_hsplit2 = parseInput("\x1b\x1b\r", &cfg, .legacy);
     try testing.expectEqual(config.Action.split_horizontal, res_hsplit2.action);
 
-    const res_vsplit = parseInput("\x1b[13;6u", &cfg);
+    const res_vsplit = parseInput("\x1b[13;6u", &cfg, .legacy);
     try testing.expectEqual(config.Action.split_vertical, res_vsplit.action);
 
-    const res_eof = parseInput("\x04", &cfg);
+    const res_eof = parseInput("\x04", &cfg, .legacy);
     try testing.expect(res_eof == .raw);
     try testing.expectEqualStrings("\x04", res_eof.raw);
 
-    const res_cw = parseInput("\x17", &cfg);
+    const res_cw = parseInput("\x17", &cfg, .legacy);
     try testing.expect(res_cw == .raw);
     try testing.expectEqualStrings("\x17", res_cw.raw);
 
     // Kitty protocol with subparameters: 116:84;6:1u (Ctrl+Shift+t press event)
-    const res_cst_sub = parseInput("\x1b[116:84;6:1u", &cfg);
+    const res_cst_sub = parseInput("\x1b[116:84;6:1u", &cfg, .legacy);
     try testing.expectEqual(config.Action.new_tab, res_cst_sub.action);
 
     // Key release event (event type 3) should not trigger action
-    const res_cst_release = parseInput("\x1b[116;6:3u", &cfg);
+    const res_cst_release = parseInput("\x1b[116;6:3u", &cfg, .legacy);
     try testing.expect(res_cst_release == .raw);
 
     // xterm modifyOtherKeys with subparameters
-    const res_csw_xterm = parseInput("\x1b[27;6;119~", &cfg);
+    const res_csw_xterm = parseInput("\x1b[27;6;119~", &cfg, .legacy);
     try testing.expectEqual(config.Action.close_pane, res_csw_xterm.action);
 
     // Ctrl+A in Kitty protocol (\x1b[97;5u) converts to \x01 for shell passthrough
-    const res_ctrla = parseInput("\x1b[97;5u", &cfg);
+    const res_ctrla = parseInput("\x1b[97;5u", &cfg, .legacy);
     try testing.expect(res_ctrla == .single_byte);
     try testing.expectEqual(@as(u8, 0x01), res_ctrla.single_byte);
 
     // Ctrl+L in Kitty protocol (\x1b[108;5u) converts to \x0c (clear screen) for shell passthrough
-    const res_ctrll = parseInput("\x1b[108;5u", &cfg);
+    const res_ctrll = parseInput("\x1b[108;5u", &cfg, .legacy);
     try testing.expect(res_ctrll == .single_byte);
     try testing.expectEqual(@as(u8, 0x0c), res_ctrll.single_byte);
 
     // Ctrl+Shift+C copy action tests across formats
-    const res_csc_kitty = parseInput("\x1b[99;6u", &cfg);
+    const res_csc_kitty = parseInput("\x1b[99;6u", &cfg, .legacy);
     try testing.expectEqual(config.Action.copy, res_csc_kitty.action);
 
-    const res_csc_xterm1 = parseInput("\x1b[27;6;99~", &cfg);
+    const res_csc_xterm1 = parseInput("\x1b[27;6;99~", &cfg, .legacy);
     try testing.expectEqual(config.Action.copy, res_csc_xterm1.action);
 
-    const res_csc_xterm2 = parseInput("\x1b[99;6~", &cfg);
+    const res_csc_xterm2 = parseInput("\x1b[99;6~", &cfg, .legacy);
     try testing.expectEqual(config.Action.copy, res_csc_xterm2.action);
+
+    // Ctrl+Tab / Ctrl+Shift+Tab switch tabs
+    const res_ctab = parseInput("\x1b[9;5u", &cfg, .legacy);
+    try testing.expectEqual(config.Action.next_tab, res_ctab.action);
+
+    const res_cstab = parseInput("\x1b[9;6u", &cfg, .legacy);
+    try testing.expectEqual(config.Action.prev_tab, res_cstab.action);
+
+    // Shift+Tab keeps its universal backtab encoding
+    const res_stab = parseInput("\x1b[9;2u", &cfg, .legacy);
+    try testing.expect(res_stab == .sequence);
+    try testing.expectEqualStrings("\x1b[Z", res_stab.sequence.slice());
+
+    const res_stab_legacy = parseInput("\x1b[Z", &cfg, .legacy);
+    try testing.expect(res_stab_legacy == .sequence);
+    try testing.expectEqualStrings("\x1b[Z", res_stab_legacy.sequence.slice());
+
+    // Shift+Enter: plain Enter for legacy apps, extended encoding otherwise
+    const res_senter_legacy = parseInput("\x1b[13;2u", &cfg, .legacy);
+    try testing.expect(res_senter_legacy == .single_byte);
+    try testing.expectEqual(@as(u8, '\r'), res_senter_legacy.single_byte);
+
+    const res_senter_kitty = parseInput("\x1b[13;2u", &cfg, .kitty);
+    try testing.expect(res_senter_kitty == .sequence);
+    try testing.expectEqualStrings("\x1b[13;2u", res_senter_kitty.sequence.slice());
+
+    const res_senter_mok = parseInput("\x1b[13;2u", &cfg, .modify_other_keys);
+    try testing.expect(res_senter_mok == .sequence);
+    try testing.expectEqualStrings("\x1b[27;2;13~", res_senter_mok.sequence.slice());
+
+    // Plain Enter/Tab must never be re-encoded as extended keys
+    const res_plain_enter = parseInput("\x1b[13u", &cfg, .modify_other_keys);
+    try testing.expect(res_plain_enter == .single_byte);
+    try testing.expectEqual(@as(u8, '\r'), res_plain_enter.single_byte);
+
+    const res_plain_tab = parseInput("\x1b[9u", &cfg, .kitty);
+    try testing.expect(res_plain_tab == .single_byte);
+    try testing.expectEqual(@as(u8, '\t'), res_plain_tab.single_byte);
+
+    // Alt+Arrow also works when the terminal prefixes Alt with an extra ESC
+    const res_alt_left = parseInput("\x1b\x1b[D", &cfg, .legacy);
+    try testing.expectEqual(config.Action.focus_left, res_alt_left.action);
+
+    // Unmodified cursor keys reported with an explicit modifier must be
+    // normalized to the legacy form (readline expects ESC [ A, not ESC [ 1;1A).
+    const res_up = parseInput("\x1b[1;1A", &cfg, .legacy);
+    try testing.expect(res_up == .sequence);
+    try testing.expectEqualStrings("\x1b[A", res_up.sequence.slice());
+
+    const res_down = parseInput("\x1b[1;1B", &cfg, .modify_other_keys);
+    try testing.expect(res_down == .sequence);
+    try testing.expectEqualStrings("\x1b[B", res_down.sequence.slice());
+
+    const res_right = parseInput("\x1b[1;1C", &cfg, .kitty);
+    try testing.expect(res_right == .sequence);
+    try testing.expectEqualStrings("\x1b[C", res_right.sequence.slice());
+
+    const res_legacy_left = parseInput("\x1b[D", &cfg, .legacy);
+    try testing.expect(res_legacy_left == .sequence);
+    try testing.expectEqualStrings("\x1b[D", res_legacy_left.sequence.slice());
+
+    // Modified cursor keys keep their modifier information
+    const res_ctrl_right = parseInput("\x1b[1;5C", &cfg, .legacy);
+    try testing.expect(res_ctrl_right == .sequence);
+    try testing.expectEqualStrings("\x1b[1;5C", res_ctrl_right.sequence.slice());
+
+    // Page keys likewise
+    const res_pgup = parseInput("\x1b[5;1~", &cfg, .legacy);
+    try testing.expect(res_pgup == .sequence);
+    try testing.expectEqualStrings("\x1b[5~", res_pgup.sequence.slice());
+
+    // Home/End/Insert/Delete with an explicit "no modifier" are normalized too
+    const res_home = parseInput("\x1b[1;1H", &cfg, .legacy);
+    try testing.expect(res_home == .sequence);
+    try testing.expectEqualStrings("\x1b[H", res_home.sequence.slice());
+
+    const res_end = parseInput("\x1b[1;1F", &cfg, .legacy);
+    try testing.expect(res_end == .sequence);
+    try testing.expectEqualStrings("\x1b[F", res_end.sequence.slice());
+
+    const res_del = parseInput("\x1b[3;1~", &cfg, .legacy);
+    try testing.expect(res_del == .sequence);
+    try testing.expectEqualStrings("\x1b[3~", res_del.sequence.slice());
+
+    const res_ins = parseInput("\x1b[2;1~", &cfg, .legacy);
+    try testing.expect(res_ins == .sequence);
+    try testing.expectEqualStrings("\x1b[2~", res_ins.sequence.slice());
+
+    // Legacy forms pass through untouched
+    const res_del_legacy = parseInput("\x1b[3~", &cfg, .legacy);
+    try testing.expect(res_del_legacy == .sequence);
+    try testing.expectEqualStrings("\x1b[3~", res_del_legacy.sequence.slice());
+
+    const default_ctab = cfg.getAction(.{ .ctrl = true, .code = .tab });
+    try testing.expectEqual(@as(?config.Action, .next_tab), default_ctab);
+    const default_cstab = cfg.getAction(.{ .ctrl = true, .shift = true, .code = .tab });
+    try testing.expectEqual(@as(?config.Action, .prev_tab), default_cstab);
+}
+
+test "lock bits in modifier parameters do not become modifiers" {
+    const testing = std.testing;
+    var cfg = config.Config.init(testing.allocator);
+    defer cfg.deinit();
+
+    // CapsLock (64) and NumLock (128) are part of the kitty modifier
+    // parameter. A plain arrow with NumLock on arrives as CSI 1;129A and
+    // must still be an unmodified arrow, not Alt+Arrow.
+    const up_num = parseInput("\x1b[1;129A", &cfg, .legacy);
+    try testing.expect(up_num == .sequence);
+    try testing.expectEqualStrings("\x1b[A", up_num.sequence.slice());
+
+    const up_caps = parseInput("\x1b[1;65A", &cfg, .legacy);
+    try testing.expect(up_caps == .sequence);
+    try testing.expectEqualStrings("\x1b[A", up_caps.sequence.slice());
+
+    // Kitty functional key codes for the cursor block.
+    const kitty_up = parseInput("\x1b[57352;129u", &cfg, .kitty);
+    try testing.expect(kitty_up == .sequence);
+    try testing.expectEqualStrings("\x1b[A", kitty_up.sequence.slice());
+
+    const kitty_down = parseInput("\x1b[57353;1u", &cfg, .legacy);
+    try testing.expect(kitty_down == .sequence);
+    try testing.expectEqualStrings("\x1b[B", kitty_down.sequence.slice());
+
+    const kitty_left = parseInput("\x1b[57350;1u", &cfg, .legacy);
+    try testing.expect(kitty_left == .sequence);
+    try testing.expectEqualStrings("\x1b[D", kitty_left.sequence.slice());
+
+    const kitty_right = parseInput("\x1b[57351;1u", &cfg, .legacy);
+    try testing.expect(kitty_right == .sequence);
+    try testing.expectEqualStrings("\x1b[C", kitty_right.sequence.slice());
+
+    // Real modifiers survive; lock bits do not leak into them.
+    const ctrl_down = parseInput("\x1b[57353;133u", &cfg, .legacy);
+    try testing.expect(ctrl_down == .sequence);
+    try testing.expectEqualStrings("\x1b[1;5B", ctrl_down.sequence.slice());
+
+    // Enter/Tab with lock bits still map to their control bytes.
+    const enter_num = parseInput("\x1b[13;129u", &cfg, .legacy);
+    try testing.expect(enter_num == .single_byte);
+    try testing.expectEqual(@as(u8, '\r'), enter_num.single_byte);
+
+    const tab_caps = parseInput("\x1b[9;65u", &cfg, .legacy);
+    try testing.expect(tab_caps == .single_byte);
+    try testing.expectEqual(@as(u8, '\t'), tab_caps.single_byte);
+
+    // Page keys keep the legacy form without the lock bits.
+    const pgup_num = parseInput("\x1b[57354;129u", &cfg, .legacy);
+    try testing.expect(pgup_num == .sequence);
+    try testing.expectEqualStrings("\x1b[5~", pgup_num.sequence.slice());
+
+    // Home/End/Insert/Delete normalization also strips lock bits.
+    const home_num = parseInput("\x1b[1;129H", &cfg, .legacy);
+    try testing.expect(home_num == .sequence);
+    try testing.expectEqualStrings("\x1b[H", home_num.sequence.slice());
+
+    const end_caps = parseInput("\x1b[57357;65u", &cfg, .legacy);
+    try testing.expect(end_caps == .sequence);
+    try testing.expectEqualStrings("\x1b[F", end_caps.sequence.slice());
+
+    const del_num = parseInput("\x1b[3;129~", &cfg, .legacy);
+    try testing.expect(del_num == .sequence);
+    try testing.expectEqualStrings("\x1b[3~", del_num.sequence.slice());
+
+    const ins_caps = parseInput("\x1b[57348;65u", &cfg, .legacy);
+    try testing.expect(ins_caps == .sequence);
+    try testing.expectEqualStrings("\x1b[2~", ins_caps.sequence.slice());
+
+    // Kitty Alt+letter has a legacy ESC prefix; readline would otherwise
+    // print the escape sequence verbatim.
+    const alt_b = parseInput("\x1b[98;3u", &cfg, .legacy);
+    try testing.expect(alt_b == .sequence);
+    try testing.expectEqualStrings("\x1bb", alt_b.sequence.slice());
+
+    // Shift+letter from an extended encoding keeps its case.
+    const shift_a = parseInput("\x1b[97;2u", &cfg, .legacy);
+    try testing.expect(shift_a == .single_byte);
+    try testing.expectEqual(@as(u8, 'A'), shift_a.single_byte);
 }

@@ -3,6 +3,7 @@ const vterm_mod = @import("vterm.zig");
 const pty_mod = @import("pty.zig");
 const tree_mod = @import("tree.zig");
 const config = @import("config.zig");
+const input_mod = @import("input.zig");
 
 pub const Selection = struct {
     start_x: u16 = 0,
@@ -44,8 +45,9 @@ pub const Pane = struct {
     rect: tree_mod.Rect,
     allocator: std.mem.Allocator,
     selection: Selection = .{},
+    key_protocol: input_mod.KeyProtocol = .legacy,
 
-    pub fn init(allocator: std.mem.Allocator, id: u32, cols: u16, rows: u16, shell: ?[]const u8) !*Pane {
+    pub fn init(allocator: std.mem.Allocator, id: u32, cols: u16, rows: u16, shell: ?[]const u8, cwd: ?[]const u8) !*Pane {
         const pane = try allocator.create(Pane);
         errdefer allocator.destroy(pane);
 
@@ -55,7 +57,7 @@ pub const Pane = struct {
         var vt = try vterm_mod.VTerm.init(allocator, safe_cols, safe_rows);
         errdefer vt.deinit();
 
-        const pty_inst = try pty_mod.Pty.spawn(safe_cols, safe_rows, shell);
+        const pty_inst = try pty_mod.Pty.spawn(safe_cols, safe_rows, shell, cwd);
 
         pane.* = .{
             .id = id,
@@ -64,6 +66,7 @@ pub const Pane = struct {
             .rect = .{ .x = 0, .y = 0, .width = safe_cols, .height = safe_rows },
             .allocator = allocator,
             .selection = .{},
+            .key_protocol = .legacy,
         };
         return pane;
     }
@@ -92,7 +95,9 @@ pub const Pane = struct {
             const n = self.pty.read(buf);
             if (n > 0) {
                 had_read = true;
-                self.vterm.writeInput(buf[0..@intCast(n)]);
+                const chunk = buf[0..@intCast(n)];
+                self.scanKeyProtocol(chunk);
+                self.vterm.writeInput(chunk);
                 self.flushReply();
             } else if (n == 0) {
                 return false;
@@ -101,6 +106,39 @@ pub const Pane = struct {
             }
         }
         return if (had_read) true else self.pty.checkAlive();
+    }
+
+    /// Watch for keyboard protocol negotiation requests coming from programs
+    /// running inside the pane (kitty "CSI > 1 u" / xterm modifyOtherKeys
+    /// "CSI > 4 ; 2 m"). Needed to know how to encode Shift+Enter etc.
+    fn scanKeyProtocol(self: *Pane, chunk: []const u8) void {
+        var i: usize = 0;
+        while (i < chunk.len) : (i += 1) {
+            if (chunk[i] != 0x1b) continue;
+            const rest = chunk[i..];
+            if (std.mem.startsWith(u8, rest, "\x1b[>1u") or std.mem.startsWith(u8, rest, "\x1b[=1u") or std.mem.startsWith(u8, rest, "\x1b[>1;") or std.mem.startsWith(u8, rest, "\x1b[=1;")) {
+                self.key_protocol = .kitty;
+            } else if (std.mem.startsWith(u8, rest, "\x1b[<u") or std.mem.startsWith(u8, rest, "\x1b[=0u")) {
+                if (self.key_protocol == .kitty) self.key_protocol = .legacy;
+            } else if (std.mem.startsWith(u8, rest, "\x1b[>4;2m") or std.mem.startsWith(u8, rest, "\x1b[>4;1m") or std.mem.startsWith(u8, rest, "\x1b[>4m")) {
+                if (self.key_protocol == .legacy) self.key_protocol = .modify_other_keys;
+            } else if (std.mem.startsWith(u8, rest, "\x1b[>4;0m")) {
+                if (self.key_protocol == .modify_other_keys) self.key_protocol = .legacy;
+            }
+        }
+    }
+
+    /// Working directory of the program currently running in this pane.
+    pub fn getCwd(self: *Pane, buf: []u8) ?[]const u8 {
+        return self.pty.getCwd(buf);
+    }
+
+    /// Whether the pane currently shows a running full-screen/TUI application
+    /// (opencode, nvim, htop, less, ...). Prompt wrappers such as `ghost` also
+    /// own the terminal while a shell sits idle, but they stay on the primary
+    /// screen, so checking the alternate screen avoids false positives.
+    pub fn isAppRunning(self: *Pane) bool {
+        return self.vterm.is_alt_screen;
     }
 
     pub fn flushReply(self: *Pane) void {
@@ -188,12 +226,12 @@ pub const Tab = struct {
     next_pane_id: u32 = 1,
     shell: ?[]const u8 = null,
 
-    pub fn init(allocator: std.mem.Allocator, id: u32, cols: u16, rows: u16, shell: ?[]const u8) !*Tab {
+    pub fn init(allocator: std.mem.Allocator, id: u32, cols: u16, rows: u16, shell: ?[]const u8, cwd: ?[]const u8) !*Tab {
         const tab = try allocator.create(Tab);
         errdefer allocator.destroy(tab);
 
         const pane_id: u32 = 1;
-        const first_pane = try Pane.init(allocator, pane_id, cols, rows, shell);
+        const first_pane = try Pane.init(allocator, pane_id, cols, rows, shell, cwd);
         errdefer first_pane.deinit();
 
         const root_node = try tree_mod.Node.createLeaf(allocator, pane_id);
@@ -250,7 +288,10 @@ pub const Tab = struct {
         const new_id = self.next_pane_id;
         self.next_pane_id += 1;
 
-        const new_pane = try Pane.init(self.allocator, new_id, active.rect.width, active.rect.height, self.shell);
+        var cwd_buf: [4096]u8 = undefined;
+        const cwd = active.getCwd(&cwd_buf);
+
+        const new_pane = try Pane.init(self.allocator, new_id, active.rect.width, active.rect.height, self.shell, cwd);
         errdefer new_pane.deinit();
 
         try self.panes.put(new_id, new_pane);
@@ -337,7 +378,7 @@ pub const Tab = struct {
 
 test "pane selection and text extraction" {
     const testing = std.testing;
-    var pane = try Pane.init(testing.allocator, 1, 20, 5, null);
+    var pane = try Pane.init(testing.allocator, 1, 20, 5, null, null);
     defer pane.deinit();
 
     pane.vterm.writeInput("hello world\r\nsecond line here");

@@ -96,7 +96,8 @@ pub const Theme = struct {
     tab_inactive_format_len: usize = 0,
 
     tab_bar_bg: vterm_mod.Color = vterm_mod.Color.defaultColor(),
-    tab_active_bg: vterm_mod.Color = vterm_mod.Color.defaultColor(),
+    // Slightly lighter background behind the active tab name
+    tab_active_bg: vterm_mod.Color = vterm_mod.Color.rgb(0x3B, 0x42, 0x52),
     tab_active_fg: vterm_mod.Color = vterm_mod.Color.rgb(0x81, 0xA1, 0xC1),
     tab_active_bold: bool = true,
 
@@ -201,8 +202,10 @@ pub const Config = struct {
         try self.addBinding(.{ .alt = true, .code = .{ .char = 'w' } }, .close_pane);
 
         try self.addBinding(.{ .ctrl = true, .shift = true, .code = .{ .char = 'n' } }, .next_tab);
+        try self.addBinding(.{ .ctrl = true, .code = .tab }, .next_tab);
         try self.addBinding(.{ .alt = true, .code = .{ .char = 'n' } }, .next_tab);
         try self.addBinding(.{ .ctrl = true, .shift = true, .code = .{ .char = 'p' } }, .prev_tab);
+        try self.addBinding(.{ .ctrl = true, .shift = true, .code = .tab }, .prev_tab);
         try self.addBinding(.{ .alt = true, .code = .{ .char = 'p' } }, .prev_tab);
 
         try self.addBinding(.{ .ctrl = true, .shift = true, .code = .enter }, .split_vertical);
@@ -259,8 +262,8 @@ pub const default_ini_content =
     \\# Special keys: enter, tab, backspace, esc, up, down, left, right, page_up, page_down
     \\new_tab = ctrl+shift+t, alt+t
     \\close_pane = ctrl+shift+w, alt+w
-    \\next_tab = ctrl+shift+n, alt+n
-    \\prev_tab = ctrl+shift+p, alt+p
+    \\next_tab = ctrl+tab, ctrl+shift+n, alt+n
+    \\prev_tab = ctrl+shift+tab, ctrl+shift+p, alt+p
     \\split_vertical = ctrl+shift+enter, alt+enter, alt+v
     \\split_horizontal = alt+shift+enter, ctrl+shift+d, alt+d
     \\focus_left = ctrl+shift+left, alt+left, alt+h
@@ -286,7 +289,7 @@ pub const default_ini_content =
     \\# inactive_format = "{title}"
     \\# Colors: default / transparent / none, 0-255 (256-color index), #RRGGBB (hex), or standard color name
     \\tab_bar_bg = transparent
-    \\active_bg = transparent
+    \\active_bg = #3B4252
     \\active_fg = #81A1C1
     \\active_bold = true
     \\inactive_bg = transparent

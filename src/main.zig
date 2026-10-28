@@ -17,12 +17,14 @@ const usage =
     \\Default Keybindings:
     \\  Ctrl+Shift+T / Alt+t      New tab
     \\  Ctrl+Shift+W / Alt+w      Close focused pane / tab
-    \\  Ctrl+Shift+N / Alt+n      Next tab
-    \\  Ctrl+Shift+P / Alt+p      Previous tab
+    \\  Ctrl+Tab / Alt+n          Next tab
+    \\  Ctrl+Shift+Tab / Alt+p    Previous tab
     \\  Ctrl+Shift+Enter / Alt+v  Vertical split (side-by-side)
     \\  Ctrl+Shift+D / Alt+d      Horizontal split (top/bottom)
-    \\  Ctrl+Shift+Arrows / Alt+h/j/k/l  Navigate between panes
+    \\  Alt+Arrows / Alt+h/j/k/l  Navigate between panes
     \\  Alt+Shift+Arrows / Alt+H/J/K/L   Resize focused pane
+    \\
+    \\Closing a pane or tab with a running full-screen app asks for confirmation.
     \\
 ;
 

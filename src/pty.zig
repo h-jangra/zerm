@@ -10,7 +10,7 @@ pub const Pty = struct {
     pid: posix.pid_t,
     is_alive: bool,
 
-    pub fn spawn(cols: u16, rows: u16, custom_shell: ?[]const u8) !Pty {
+    pub fn spawn(cols: u16, rows: u16, custom_shell: ?[]const u8, cwd: ?[]const u8) !Pty {
         const master = try posix.openatZ(posix.AT.FDCWD, "/dev/ptmx", .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }, 0);
         errdefer _ = posix.system.close(master);
 
@@ -57,6 +57,16 @@ pub const Pty = struct {
             }
         }
 
+        var cwd_buf: [4096:0]u8 = undefined;
+        var cwd_path: ?[:0]const u8 = null;
+        if (cwd) |dir| {
+            if (dir.len > 0 and dir.len < cwd_buf.len) {
+                @memcpy(cwd_buf[0..dir.len], dir);
+                cwd_buf[dir.len] = 0;
+                cwd_path = cwd_buf[0..dir.len :0];
+            }
+        }
+
         const pid_res = linux.fork();
         const pid_val: isize = @bitCast(pid_res);
         if (pid_val < 0) {
@@ -64,6 +74,10 @@ pub const Pty = struct {
         } else if (pid_val == 0) {
             _ = linux.setsid();
             _ = posix.system.ioctl(slave, posix.T.IOCSCTTY, 0);
+
+            if (cwd_path) |dir| {
+                _ = linux.chdir(dir.ptr);
+            }
 
             _ = posix.system.dup2(slave, 0);
             _ = posix.system.dup2(slave, 1);
@@ -139,6 +153,27 @@ pub const Pty = struct {
             .ypixel = 0,
         };
         _ = posix.system.ioctl(self.master, posix.T.IOCSWINSZ, @intFromPtr(&ws));
+    }
+
+    /// Current working directory of the shell running in this pane. Used so
+    /// new tabs/panes inherit the directory they are opened from.
+    pub fn getCwd(self: *Pty, buf: []u8) ?[]const u8 {
+        if (readProcCwd(self.pid, buf)) |cwd| return cwd;
+
+        var fg_pgrp: posix.pid_t = 0;
+        if (posix.system.tcgetpgrp(self.master, &fg_pgrp) == 0 and fg_pgrp > 0) {
+            if (readProcCwd(fg_pgrp, buf)) |cwd| return cwd;
+        }
+        return null;
+    }
+
+    fn readProcCwd(pid: posix.pid_t, buf: []u8) ?[]const u8 {
+        var path_buf: [64]u8 = undefined;
+        const path = std.mem.printSentinel(&path_buf, "/proc/{d}/cwd", .{pid}, 0) catch return null;
+        const rc = posix.system.readlink(path, buf.ptr, buf.len);
+        const n: isize = @bitCast(rc);
+        if (n <= 0 or n > buf.len) return null;
+        return buf[0..@intCast(n)];
     }
 
     pub fn write(self: *Pty, bytes: []const u8) isize {

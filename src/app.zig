@@ -29,6 +29,12 @@ fn getMilliTimestamp() i64 {
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
+pub const PendingClose = struct {
+    tab_id: u32,
+    pane_id: u32,
+    closes_tab: bool,
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     cfg: config.Config,
@@ -42,6 +48,7 @@ pub const App = struct {
     term_width: u16 = 80,
     term_height: u16 = 24,
     force_render: bool = true,
+    pending_close: ?PendingClose = null,
 
     pub fn init(allocator: std.mem.Allocator, shell_arg: ?[]const u8) !*App {
         const app = try allocator.create(App);
@@ -149,8 +156,21 @@ pub const App = struct {
         const tab_id = self.next_tab_id;
         self.next_tab_id += 1;
 
+        var cwd_buf: [4096]u8 = undefined;
+        var cwd: ?[]const u8 = null;
+        if (self.tabs.items.len > 0 and self.active_tab_index < self.tabs.items.len) {
+            if (self.tabs.items[self.active_tab_index].getActivePane()) |pane| {
+                cwd = pane.getCwd(&cwd_buf);
+            }
+        }
+        if (cwd == null) {
+            const rc = std.os.linux.readlink("/proc/self/cwd", &cwd_buf, cwd_buf.len);
+            const n: isize = @bitCast(rc);
+            if (n > 0 and n <= cwd_buf.len) cwd = cwd_buf[0..@intCast(n)];
+        }
+
         const area = self.getTabArea();
-        const tab = try tab_mod.Tab.init(self.allocator, tab_id, area.width, area.height, self.shell);
+        const tab = try tab_mod.Tab.init(self.allocator, tab_id, area.width, area.height, self.shell, cwd);
         errdefer tab.deinit();
 
         try self.tabs.append(self.allocator, tab);
@@ -239,7 +259,7 @@ pub const App = struct {
         var last_render_time: i64 = getMilliTimestamp();
         const FRAME_TIME_MS: i64 = 8; // ~125 FPS for ultra-smooth animations and instant responsiveness
 
-        try self.renderer.render(self.tabs.items, self.active_tab_index, &self.cfg.theme);
+        try self.renderer.render(self.tabs.items, self.active_tab_index, &self.cfg.theme, self.pendingPrompt());
         self.clearDirty();
 
         while (!self.should_exit and self.tabs.items.len > 0) {
@@ -359,7 +379,7 @@ pub const App = struct {
                 const cur_time = getMilliTimestamp();
                 const cur_elapsed = cur_time - last_render_time;
                 if (user_input_received or pty_output_received or poll_res == 0 or cur_elapsed >= FRAME_TIME_MS or self.force_render) {
-                    try self.renderer.render(self.tabs.items, self.active_tab_index, &self.cfg.theme);
+                    try self.renderer.render(self.tabs.items, self.active_tab_index, &self.cfg.theme, self.pendingPrompt());
                     self.clearDirty();
                     last_render_time = cur_time;
                 }
@@ -367,7 +387,57 @@ pub const App = struct {
         }
     }
 
+    fn activeKeyProtocol(self: *App) input_mod.KeyProtocol {
+        if (self.active_tab_index < self.tabs.items.len) {
+            if (self.tabs.items[self.active_tab_index].getActivePane()) |pane| {
+                return pane.key_protocol;
+            }
+        }
+        return .legacy;
+    }
+
+    fn pendingPrompt(self: *const App) ?[]const u8 {
+        const pending = self.pending_close orelse return null;
+        if (pending.closes_tab) {
+            return " Close tab with running app? [y/N] ";
+        }
+        return " Close pane with running app? [y/N] ";
+    }
+
+    fn handleConfirmInput(self: *App, input: []const u8) void {
+        for (input) |b| {
+            switch (b) {
+                'y', 'Y' => {
+                    const pending = self.pending_close orelse return;
+                    self.pending_close = null;
+                    self.closePaneInTab(pending.tab_id, pending.pane_id);
+                    return;
+                },
+                'n', 'N', 0x1b, '\r', '\n' => {
+                    self.pending_close = null;
+                    self.invalidate();
+                    return;
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn closePaneInTab(self: *App, tab_id: u32, pane_id: u32) void {
+        for (self.tabs.items, 0..) |tab, i| {
+            if (tab.id == tab_id) {
+                self.removePaneById(i, pane_id);
+                return;
+            }
+        }
+    }
+
     fn handleInput(self: *App, input: []const u8) void {
+        if (self.pending_close != null) {
+            self.handleConfirmInput(input);
+            return;
+        }
+        const protocol = self.activeKeyProtocol();
         var idx: usize = 0;
         while (idx < input.len) {
             if (std.mem.startsWith(u8, input[idx..], "\x1b[<")) {
@@ -383,25 +453,38 @@ pub const App = struct {
                 }
             }
 
+            // Alt+key sent in ESC-prefix mode arrives as ESC ESC [ ... .
+            if (input[idx] == 0x1b and idx + 2 < input.len and input[idx + 1] == 0x1b and input[idx + 2] == '[') {
+                var end_pos = idx + 3;
+                while (end_pos < input.len and (input[end_pos] < 0x40 or input[end_pos] > 0x7e)) : (end_pos += 1) {}
+                if (end_pos < input.len) {
+                    const seq = input[idx .. end_pos + 1];
+                    const parsed = input_mod.parseInput(seq, &self.cfg, protocol);
+                    self.dispatchParsedInput(parsed);
+                    idx = end_pos + 1;
+                    continue;
+                }
+            }
+
             if (input[idx] == 0x1b) {
                 if (idx + 1 < input.len and input[idx + 1] == '[') {
                     var end_pos = idx + 2;
                     while (end_pos < input.len and (input[end_pos] < 0x40 or input[end_pos] > 0x7e)) : (end_pos += 1) {}
                     if (end_pos < input.len) {
                         const csi_seq = input[idx .. end_pos + 1];
-                        const parsed = input_mod.parseInput(csi_seq, &self.cfg);
+                        const parsed = input_mod.parseInput(csi_seq, &self.cfg, protocol);
                         self.dispatchParsedInput(parsed);
                         idx = end_pos + 1;
                         continue;
                     }
                 }
-                const parsed = input_mod.parseInput(input[idx .. idx + 1], &self.cfg);
+                const parsed = input_mod.parseInput(input[idx .. idx + 1], &self.cfg, protocol);
                 self.dispatchParsedInput(parsed);
                 idx += 1;
                 continue;
             }
 
-            const parsed = input_mod.parseInput(input[idx .. idx + 1], &self.cfg);
+            const parsed = input_mod.parseInput(input[idx .. idx + 1], &self.cfg, protocol);
             self.dispatchParsedInput(parsed);
             idx += 1;
         }
@@ -431,51 +514,37 @@ pub const App = struct {
                 self.handleMouse(m);
             },
             .raw => |raw_bytes| {
-                if (self.active_tab_index < self.tabs.items.len) {
-                    const tab = self.tabs.items[self.active_tab_index];
-                    if (tab.getActivePane()) |pane| {
-                        if (pane.selection.active) {
-                            if (raw_bytes.len == 1 and raw_bytes[0] == 0x03) {
-                                // Ctrl+C with active selection: copy to clipboard and clear selection
-                                pane.copySelectionToClipboard(self.allocator);
-                                pane.clearSelection();
-                                self.invalidate();
-                                return;
-                            }
-                            pane.clearSelection();
-                            self.invalidate();
-                        }
-                        if (pane.vterm.scroll_offset > 0) {
-                            pane.vterm.scrollToBottom();
-                            self.invalidate();
-                        }
-                        pane.writeToPty(raw_bytes);
-                    }
-                }
+                self.forwardInputBytes(raw_bytes);
             },
             .single_byte => |b| {
-                if (self.active_tab_index < self.tabs.items.len) {
-                    const tab = self.tabs.items[self.active_tab_index];
-                    if (tab.getActivePane()) |pane| {
-                        if (pane.selection.active) {
-                            if (b == 0x03) {
-                                // Ctrl+C with active selection: copy to clipboard and clear selection
-                                pane.copySelectionToClipboard(self.allocator);
-                                pane.clearSelection();
-                                self.invalidate();
-                                return;
-                            }
-                            pane.clearSelection();
-                            self.invalidate();
-                        }
-                        if (pane.vterm.scroll_offset > 0) {
-                            pane.vterm.scrollToBottom();
-                            self.invalidate();
-                        }
-                        pane.writeToPty(&[_]u8{b});
-                    }
-                }
+                self.forwardInputBytes(&[_]u8{b});
             },
+            .sequence => |seq| {
+                self.forwardInputBytes(seq.slice());
+            },
+        }
+    }
+
+    fn forwardInputBytes(self: *App, bytes: []const u8) void {
+        if (self.active_tab_index >= self.tabs.items.len) return;
+        const tab = self.tabs.items[self.active_tab_index];
+        if (tab.getActivePane()) |pane| {
+            if (pane.selection.active) {
+                if (bytes.len == 1 and bytes[0] == 0x03) {
+                    // Ctrl+C with active selection: copy to clipboard and clear selection
+                    pane.copySelectionToClipboard(self.allocator);
+                    pane.clearSelection();
+                    self.invalidate();
+                    return;
+                }
+                pane.clearSelection();
+                self.invalidate();
+            }
+            if (pane.vterm.scroll_offset > 0) {
+                pane.vterm.scrollToBottom();
+                self.invalidate();
+            }
+            pane.writeToPty(bytes);
         }
     }
 
@@ -681,6 +750,17 @@ pub const App = struct {
             .close_pane => {
                 if (self.active_tab_index < self.tabs.items.len) {
                     const tab = self.tabs.items[self.active_tab_index];
+                    if (tab.getActivePane()) |pane| {
+                        if (pane.isAppRunning()) {
+                            self.pending_close = .{
+                                .tab_id = tab.id,
+                                .pane_id = pane.id,
+                                .closes_tab = tab.panes.count() == 1,
+                            };
+                            self.invalidate();
+                            return;
+                        }
+                    }
                     const should_close_tab = tab.closeActivePane(area);
                     if (should_close_tab) {
                         self.closeActiveTab();
@@ -786,6 +866,14 @@ pub const App = struct {
     fn removePaneById(self: *App, tab_idx: usize, pane_id: u32) void {
         if (tab_idx >= self.tabs.items.len) return;
         const tab = self.tabs.items[tab_idx];
+
+        if (self.pending_close) |pending| {
+            if (pending.tab_id == tab.id and pending.pane_id == pane_id) {
+                self.pending_close = null;
+                self.invalidate();
+            }
+        }
+
         const should_close_tab = tab.closePaneById(pane_id, self.getTabArea());
         if (should_close_tab) {
             _ = self.tabs.orderedRemove(tab_idx);

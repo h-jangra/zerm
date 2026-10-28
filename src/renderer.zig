@@ -89,6 +89,7 @@ pub const Renderer = struct {
         tabs: []*tab_mod.Tab,
         active_tab_idx: usize,
         theme: *const config.Theme,
+        prompt: ?[]const u8,
     ) !void {
         if (tabs.len == 0 or active_tab_idx >= tabs.len) return;
 
@@ -124,7 +125,44 @@ pub const Renderer = struct {
             self.renderTabBar(tabs, active_tab_idx, theme);
         }
 
-        try self.flushDiff(active_tab, tab_bar_h);
+        if (prompt) |message| {
+            self.renderPrompt(message);
+        }
+
+        try self.flushDiff(active_tab, tab_bar_h, prompt);
+    }
+
+    fn renderPrompt(self: *Renderer, message: []const u8) void {
+        if (self.height == 0) return;
+
+        const row_offset = @as(usize, self.height - 1) * self.width;
+        const bg = vterm_mod.Color.rgb(0x4C, 0x2A, 0x2A);
+        const fg = vterm_mod.Color.rgb(0xEC, 0xEF, 0xF4);
+
+        var x: u16 = 0;
+        while (x < self.width) : (x += 1) {
+            self.back[row_offset + x] = .{
+                .char = ' ',
+                .fg = fg,
+                .bg = bg,
+            };
+        }
+
+        const start: u16 = if (message.len < self.width)
+            @intCast((@as(usize, self.width) - message.len) / 2)
+        else
+            0;
+
+        for (message, 0..) |ch, i| {
+            const px = @as(usize, start) + i;
+            if (px >= self.width) break;
+            self.back[row_offset + px] = .{
+                .char = ch,
+                .fg = fg,
+                .bg = bg,
+                .attrs = .{ .bold = true },
+            };
+        }
     }
 
     fn renderTabBar(self: *Renderer, tabs: []*tab_mod.Tab, active_tab_idx: usize, theme: *const config.Theme) void {
@@ -296,7 +334,7 @@ pub const Renderer = struct {
         }
     }
 
-    fn flushDiff(self: *Renderer, active_tab: *const tab_mod.Tab, tab_bar_h: u16) !void {
+    fn flushDiff(self: *Renderer, active_tab: *const tab_mod.Tab, tab_bar_h: u16, prompt: ?[]const u8) !void {
         _ = tab_bar_h;
         self.out_buf.clearRetainingCapacity();
 
@@ -305,7 +343,9 @@ pub const Renderer = struct {
         var target_cursor_visible = true;
         var target_cursor_shape: u8 = 0;
 
-        if (active_tab.getActivePane()) |active_pane| {
+        if (prompt != null) {
+            target_cursor_visible = false;
+        } else if (active_tab.getActivePane()) |active_pane| {
             const pane_cur_x = active_pane.rect.x + active_pane.vterm.cursor_x;
             const pane_cur_y = active_pane.rect.y + active_pane.vterm.cursor_y;
             target_cursor_x = @min(self.width, pane_cur_x + 1);
