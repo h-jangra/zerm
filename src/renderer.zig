@@ -200,7 +200,6 @@ pub const Renderer = struct {
                 x += 1;
             }
 
-            // left padding
             if (x < max_x) {
                 self.back[row_offset + x] = .{ .char = ' ', .fg = fg, .bg = bg, .attrs = attrs };
                 x += 1;
@@ -217,7 +216,6 @@ pub const Renderer = struct {
                 x += 1;
             }
 
-            // right padding
             if (x < max_x) {
                 self.back[row_offset + x] = .{ .char = ' ', .fg = fg, .bg = bg, .attrs = attrs };
                 x += 1;
@@ -230,7 +228,6 @@ pub const Renderer = struct {
         const pane_h = pane.vterm.height;
 
         if (pane.vterm.scroll_offset == 0 and !pane.selection.active) {
-            // Fast path: direct row memcpy from activeGrid
             const grid = pane.vterm.activeGrid();
             var py: u16 = 0;
             while (py < pane_h and rect.y + py < self.height) : (py += 1) {
@@ -243,7 +240,6 @@ pub const Renderer = struct {
                 }
             }
         } else {
-            // Selection / scrollback rendering path
             const norm = if (pane.selection.active) pane.selection.getNormalized() else null;
             var py: u16 = 0;
             while (py < pane_h and rect.y + py < self.height) : (py += 1) {

@@ -54,25 +54,21 @@ test "translatePasteToLegacy converts line breaks to CR" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    // LF becomes CR
     {
         const out = try translatePasteToLegacy(allocator, "line1\nline2\nline3");
         defer allocator.free(out);
         try testing.expectEqualStrings("line1\rline2\rline3", out);
     }
-    // CRLF collapses to a single CR
     {
         const out = try translatePasteToLegacy(allocator, "a\r\nb");
         defer allocator.free(out);
         try testing.expectEqualStrings("a\rb", out);
     }
-    // Plain text passes through untouched
     {
         const out = try translatePasteToLegacy(allocator, "no newlines here");
         defer allocator.free(out);
         try testing.expectEqualStrings("no newlines here", out);
     }
-    // Empty input
     {
         const out = try translatePasteToLegacy(allocator, "");
         defer allocator.free(out);
@@ -139,7 +135,6 @@ fn codepointToKeyCode(code: u32) ?config.KeyCode {
         9 => .tab,
         27 => .escape,
         127, 8 => .backspace,
-        // Kitty functional key codes for the cursor blocks.
         57350 => .left,
         57351 => .right,
         57352 => .up,
@@ -235,7 +230,6 @@ fn encodeExtendedKey(chord: config.KeyChord, protocol: KeyProtocol) ?EscapeSeque
 
     switch (chord.code) {
         .enter => {
-            // Plain Enter is always a carriage return.
             if (!chord.shift and !chord.ctrl and !chord.alt) return null;
             if (protocol == .legacy) return null;
             var seq = EscapeSequence{};
@@ -247,7 +241,6 @@ fn encodeExtendedKey(chord: config.KeyChord, protocol: KeyProtocol) ?EscapeSeque
             return seq;
         },
         .tab => {
-            // Shift+Tab has a universal legacy encoding (backtab).
             if (chord.shift and !chord.ctrl and !chord.alt) {
                 var seq = EscapeSequence{};
                 @memcpy(seq.buf[0..3], "\x1b[Z");
@@ -297,7 +290,6 @@ fn encodeExtendedKey(chord: config.KeyChord, protocol: KeyProtocol) ?EscapeSeque
             return seq;
         },
         .char => |c| {
-            // print verbatim.
             if (chord.alt and !chord.ctrl and c >= 0x20 and c <= 0x7e) {
                 var seq = EscapeSequence{};
                 seq.buf[0] = 0x1b;
@@ -519,29 +511,23 @@ test "input parse chord and actions" {
     try testing.expect(res_cw == .raw);
     try testing.expectEqualStrings("\x17", res_cw.raw);
 
-    // Kitty protocol with subparameters: 116:84;6:1u (Ctrl+Shift+t press event)
     const res_cst_sub = parseInput("\x1b[116:84;6:1u", &cfg, .legacy);
     try testing.expectEqual(config.Action.new_tab, res_cst_sub.action);
 
-    // Key release event (event type 3) should not trigger action
     const res_cst_release = parseInput("\x1b[116;6:3u", &cfg, .legacy);
     try testing.expect(res_cst_release == .raw);
 
-    // xterm modifyOtherKeys with subparameters
     const res_csw_xterm = parseInput("\x1b[27;6;119~", &cfg, .legacy);
     try testing.expectEqual(config.Action.close_pane, res_csw_xterm.action);
 
-    // Ctrl+A in Kitty protocol (\x1b[97;5u) converts to \x01 for shell passthrough
     const res_ctrla = parseInput("\x1b[97;5u", &cfg, .legacy);
     try testing.expect(res_ctrla == .single_byte);
     try testing.expectEqual(@as(u8, 0x01), res_ctrla.single_byte);
 
-    // Ctrl+L in Kitty protocol (\x1b[108;5u) converts to \x0c (clear screen) for shell passthrough
     const res_ctrll = parseInput("\x1b[108;5u", &cfg, .legacy);
     try testing.expect(res_ctrll == .single_byte);
     try testing.expectEqual(@as(u8, 0x0c), res_ctrll.single_byte);
 
-    // Ctrl+Shift+C copy action tests across formats
     const res_csc_kitty = parseInput("\x1b[99;6u", &cfg, .legacy);
     try testing.expectEqual(config.Action.copy, res_csc_kitty.action);
 
@@ -551,14 +537,12 @@ test "input parse chord and actions" {
     const res_csc_xterm2 = parseInput("\x1b[99;6~", &cfg, .legacy);
     try testing.expectEqual(config.Action.copy, res_csc_xterm2.action);
 
-    // Ctrl+Tab / Ctrl+Shift+Tab switch tabs
     const res_ctab = parseInput("\x1b[9;5u", &cfg, .legacy);
     try testing.expectEqual(config.Action.next_tab, res_ctab.action);
 
     const res_cstab = parseInput("\x1b[9;6u", &cfg, .legacy);
     try testing.expectEqual(config.Action.prev_tab, res_cstab.action);
 
-    // Shift+Tab keeps its universal backtab encoding
     const res_stab = parseInput("\x1b[9;2u", &cfg, .legacy);
     try testing.expect(res_stab == .sequence);
     try testing.expectEqualStrings("\x1b[Z", res_stab.sequence.slice());
@@ -567,7 +551,6 @@ test "input parse chord and actions" {
     try testing.expect(res_stab_legacy == .sequence);
     try testing.expectEqualStrings("\x1b[Z", res_stab_legacy.sequence.slice());
 
-    // Shift+Enter: plain Enter for legacy apps, extended encoding otherwise
     const res_senter_legacy = parseInput("\x1b[13;2u", &cfg, .legacy);
     try testing.expect(res_senter_legacy == .single_byte);
     try testing.expectEqual(@as(u8, '\r'), res_senter_legacy.single_byte);
@@ -580,7 +563,6 @@ test "input parse chord and actions" {
     try testing.expect(res_senter_mok == .sequence);
     try testing.expectEqualStrings("\x1b[27;2;13~", res_senter_mok.sequence.slice());
 
-    // Plain Enter/Tab must never be re-encoded as extended keys
     const res_plain_enter = parseInput("\x1b[13u", &cfg, .modify_other_keys);
     try testing.expect(res_plain_enter == .single_byte);
     try testing.expectEqual(@as(u8, '\r'), res_plain_enter.single_byte);
@@ -589,11 +571,9 @@ test "input parse chord and actions" {
     try testing.expect(res_plain_tab == .single_byte);
     try testing.expectEqual(@as(u8, '\t'), res_plain_tab.single_byte);
 
-    // Alt+Arrow also works when the terminal prefixes Alt with an extra ESC
     const res_alt_left = parseInput("\x1b\x1b[D", &cfg, .legacy);
     try testing.expectEqual(config.Action.focus_left, res_alt_left.action);
 
-    // normalized to the legacy form (readline expects ESC [ A, not ESC [ 1;1A).
     const res_up = parseInput("\x1b[1;1A", &cfg, .legacy);
     try testing.expect(res_up == .sequence);
     try testing.expectEqualStrings("\x1b[A", res_up.sequence.slice());
@@ -610,17 +590,14 @@ test "input parse chord and actions" {
     try testing.expect(res_legacy_left == .sequence);
     try testing.expectEqualStrings("\x1b[D", res_legacy_left.sequence.slice());
 
-    // Modified cursor keys keep their modifier information
     const res_ctrl_right = parseInput("\x1b[1;5C", &cfg, .legacy);
     try testing.expect(res_ctrl_right == .sequence);
     try testing.expectEqualStrings("\x1b[1;5C", res_ctrl_right.sequence.slice());
 
-    // Page keys likewise
     const res_pgup = parseInput("\x1b[5;1~", &cfg, .legacy);
     try testing.expect(res_pgup == .sequence);
     try testing.expectEqualStrings("\x1b[5~", res_pgup.sequence.slice());
 
-    // Home/End/Insert/Delete with an explicit "no modifier" are normalized too
     const res_home = parseInput("\x1b[1;1H", &cfg, .legacy);
     try testing.expect(res_home == .sequence);
     try testing.expectEqualStrings("\x1b[H", res_home.sequence.slice());
@@ -637,7 +614,6 @@ test "input parse chord and actions" {
     try testing.expect(res_ins == .sequence);
     try testing.expectEqualStrings("\x1b[2~", res_ins.sequence.slice());
 
-    // Legacy forms pass through untouched
     const res_del_legacy = parseInput("\x1b[3~", &cfg, .legacy);
     try testing.expect(res_del_legacy == .sequence);
     try testing.expectEqualStrings("\x1b[3~", res_del_legacy.sequence.slice());
@@ -653,7 +629,6 @@ test "lock bits in modifier parameters do not become modifiers" {
     var cfg = config.Config.init(testing.allocator);
     defer cfg.deinit();
 
-    // must still be an unmodified arrow, not Alt+Arrow.
     const up_num = parseInput("\x1b[1;129A", &cfg, .legacy);
     try testing.expect(up_num == .sequence);
     try testing.expectEqualStrings("\x1b[A", up_num.sequence.slice());
@@ -662,7 +637,6 @@ test "lock bits in modifier parameters do not become modifiers" {
     try testing.expect(up_caps == .sequence);
     try testing.expectEqualStrings("\x1b[A", up_caps.sequence.slice());
 
-    // Kitty functional key codes for the cursor block.
     const kitty_up = parseInput("\x1b[57352;129u", &cfg, .kitty);
     try testing.expect(kitty_up == .sequence);
     try testing.expectEqualStrings("\x1b[A", kitty_up.sequence.slice());
@@ -679,12 +653,10 @@ test "lock bits in modifier parameters do not become modifiers" {
     try testing.expect(kitty_right == .sequence);
     try testing.expectEqualStrings("\x1b[C", kitty_right.sequence.slice());
 
-    // Real modifiers survive; lock bits do not leak into them.
     const ctrl_down = parseInput("\x1b[57353;133u", &cfg, .legacy);
     try testing.expect(ctrl_down == .sequence);
     try testing.expectEqualStrings("\x1b[1;5B", ctrl_down.sequence.slice());
 
-    // Enter/Tab with lock bits still map to their control bytes.
     const enter_num = parseInput("\x1b[13;129u", &cfg, .legacy);
     try testing.expect(enter_num == .single_byte);
     try testing.expectEqual(@as(u8, '\r'), enter_num.single_byte);
@@ -693,12 +665,10 @@ test "lock bits in modifier parameters do not become modifiers" {
     try testing.expect(tab_caps == .single_byte);
     try testing.expectEqual(@as(u8, '\t'), tab_caps.single_byte);
 
-    // Page keys keep the legacy form without the lock bits.
     const pgup_num = parseInput("\x1b[57354;129u", &cfg, .legacy);
     try testing.expect(pgup_num == .sequence);
     try testing.expectEqualStrings("\x1b[5~", pgup_num.sequence.slice());
 
-    // Home/End/Insert/Delete normalization also strips lock bits.
     const home_num = parseInput("\x1b[1;129H", &cfg, .legacy);
     try testing.expect(home_num == .sequence);
     try testing.expectEqualStrings("\x1b[H", home_num.sequence.slice());
@@ -715,12 +685,10 @@ test "lock bits in modifier parameters do not become modifiers" {
     try testing.expect(ins_caps == .sequence);
     try testing.expectEqualStrings("\x1b[2~", ins_caps.sequence.slice());
 
-    // print the escape sequence verbatim.
     const alt_b = parseInput("\x1b[98;3u", &cfg, .legacy);
     try testing.expect(alt_b == .sequence);
     try testing.expectEqualStrings("\x1bb", alt_b.sequence.slice());
 
-    // Shift+letter from an extended encoding keeps its case.
     const shift_a = parseInput("\x1b[97;2u", &cfg, .legacy);
     try testing.expect(shift_a == .single_byte);
     try testing.expectEqual(@as(u8, 'A'), shift_a.single_byte);

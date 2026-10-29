@@ -3,31 +3,6 @@ const posix = std.posix;
 const app_mod = @import("app.zig");
 const pty_mod = @import("pty.zig");
 
-const usage =
-    \\zerm - minimal terminal multiplexer
-    \\
-    \\Usage:
-    \\  zerm [options] [command/shell]
-    \\
-    \\Options:
-    \\  -s, --shell <path>  Specify shell to spawn in new panes
-    \\  -h, --help          Show this help message
-    \\  -v, --version       Show version
-    \\
-    \\Default Keybindings:
-    \\  Ctrl+Shift+T / Alt+t      New tab
-    \\  Ctrl+Shift+W / Alt+w      Close focused pane / tab
-    \\  Ctrl+Tab / Alt+n          Next tab
-    \\  Ctrl+Shift+Tab / Alt+p    Previous tab
-    \\  Ctrl+Shift+Enter / Alt+v  Vertical split (side-by-side)
-    \\  Ctrl+Shift+D / Alt+d      Horizontal split (top/bottom)
-    \\  Alt+Arrows / Alt+h/j/k/l  Navigate between panes
-    \\  Alt+Shift+Arrows / Alt+H/J/K/L   Resize focused pane
-    \\
-    \\Closing a pane or tab with a running full-screen app asks for confirmation.
-    \\
-;
-
 pub fn main(init: std.process.Init.Minimal) !void {
     pty_mod.global_envp = init.environ.block.slice.ptr;
     pty_mod.default_shell = init.environ.getPosix("SHELL");
@@ -40,7 +15,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            _ = posix.system.write(posix.STDOUT_FILENO, usage.ptr, usage.len);
+            const h = "zerm - minimal terminal multiplexer\n";
+            _ = posix.system.write(posix.STDOUT_FILENO, h.ptr, h.len);
             return;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
             const ver = "zerm 0.1.0\n";

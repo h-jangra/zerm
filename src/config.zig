@@ -96,7 +96,6 @@ pub const Theme = struct {
     tab_inactive_format_len: usize = 0,
 
     tab_bar_bg: vterm_mod.Color = vterm_mod.Color.defaultColor(),
-    // Slightly lighter background behind the active tab name
     tab_active_bg: vterm_mod.Color = vterm_mod.Color.rgb(0x3B, 0x42, 0x52),
     tab_active_fg: vterm_mod.Color = vterm_mod.Color.rgb(0x88, 0xC0, 0xD0),
     tab_active_bold: bool = true,
@@ -216,6 +215,10 @@ pub const Config = struct {
         try self.addBinding(.{ .ctrl = true, .shift = true, .code = .{ .char = 'd' } }, .split_horizontal);
         try self.addBinding(.{ .alt = true, .code = .{ .char = 'd' } }, .split_horizontal);
 
+        try self.addBinding(.{ .alt = true, .code = .left }, .focus_left);
+        try self.addBinding(.{ .alt = true, .code = .right }, .focus_right);
+        try self.addBinding(.{ .alt = true, .code = .up }, .focus_up);
+        try self.addBinding(.{ .alt = true, .code = .down }, .focus_down);
         try self.addBinding(.{ .ctrl = true, .shift = true, .code = .left }, .focus_left);
         try self.addBinding(.{ .ctrl = true, .shift = true, .code = .right }, .focus_right);
         try self.addBinding(.{ .ctrl = true, .shift = true, .code = .up }, .focus_up);
@@ -233,61 +236,44 @@ pub const Config = struct {
     }
 };
 
-pub const default_ini_content =
-    \\# zerm configuration file
-    \\
-    \\[keybindings]
-    \\# Action = list of comma-separated key chords
-    \\# Modifiers: ctrl, alt, shift
-    \\# Special keys: enter, tab, backspace, esc, up, down, left, right, page_up, page_down
-    \\new_tab = ctrl+shift+t, alt+t
-    \\close_pane = ctrl+shift+w, alt+w
-    \\next_tab = ctrl+tab, ctrl+shift+n, alt+n
-    \\prev_tab = ctrl+shift+tab, ctrl+shift+p, alt+p
-    \\split_vertical = ctrl+shift+enter, alt+enter, alt+v
-    \\split_horizontal = alt+shift+enter, ctrl+shift+d, alt+d
-    \\focus_left = ctrl+shift+left
-    \\focus_right = ctrl+shift+right
-    \\focus_up = ctrl+shift+up
-    \\focus_down = ctrl+shift+down
-    \\resize_left = alt+shift+left, alt+H
-    \\resize_right = alt+shift+right, alt+L
-    \\resize_up = alt+shift+up, alt+K
-    \\resize_down = alt+shift+down, alt+J
-    \\scroll_page_up = shift+page_up, ctrl+shift+u, alt+page_up
-    \\scroll_page_down = shift+page_down, ctrl+shift+d, alt+page_down
-    \\copy = ctrl+shift+c, alt+c
-    \\
-    \\[tabs]
-    \\# Tab bar visibility: auto (show when >1 tab), always (show even with 1 tab), never
-    \\# show = auto
-    \\# Tab title format: use {index}, {title}, {flags} or tmux-style #I, #W, #F
-    \\# Enclose in quotes (single '...' or double "...") to preserve exact spacing and padding
-    \\format = "{title}"
-    \\# Optional: separate format for active and inactive tabs (tmux-style)
-    \\# active_format = "{title}"
-    \\# inactive_format = "{title}"
-    \\# Colors: default / transparent / none, 0-255 (256-color index), #RRGGBB (hex), or standard color name
-    \\tab_bar_bg = transparent
-    \\active_bg = #3B4252
-    \\active_fg = #81A1C1
-    \\active_bold = true
-    \\inactive_bg = transparent
-    \\inactive_fg = #81A1C1
-    \\inactive_bold = false
-    \\
-    \\[borders]
-    \\active_fg = 33
-    \\inactive_fg = 240
-    \\# Border style: single, rounded, double, ascii
-    \\style = single
-    \\
-    \\[general]
-    \\# Default shell (leave empty to use $SHELL)
-    \\shell =
-    \\resize_delta = 0.05
-    \\
-;
+pub const default_ini_content: []const u8 =
+"[keybindings]\n" ++
+"new_tab = ctrl+shift+t, alt+t\n" ++
+"close_pane = ctrl+shift+w, alt+w\n" ++
+"next_tab = ctrl+tab, ctrl+shift+n, alt+n\n" ++
+"prev_tab = ctrl+shift+tab, ctrl+shift+p, alt+p\n" ++
+"split_vertical = ctrl+shift+enter, alt+enter, alt+v\n" ++
+"split_horizontal = alt+shift+enter, ctrl+shift+d, alt+d\n" ++
+"focus_left = ctrl+shift+left, alt+left\n" ++
+"focus_right = ctrl+shift+right, alt+right\n" ++
+"focus_up = ctrl+shift+up, alt+up\n" ++
+"focus_down = ctrl+shift+down, alt+down\n" ++
+"resize_left = alt+shift+left, alt+H\n" ++
+"resize_right = alt+shift+right, alt+L\n" ++
+"resize_up = alt+shift+up, alt+K\n" ++
+"resize_down = alt+shift+down, alt+J\n" ++
+"scroll_page_up = shift+page_up, ctrl+shift+u, alt+page_up\n" ++
+"scroll_page_down = shift+page_down, ctrl+shift+d, alt+page_down\n" ++
+"copy = ctrl+shift+c, alt+c\n" ++
+"\n" ++
+"[tabs]\n" ++
+"format = \"{title}\"\n" ++
+"tab_bar_bg = transparent\n" ++
+"active_bg = #3B4252\n" ++
+"active_fg = #81A1C1\n" ++
+"active_bold = true\n" ++
+"inactive_bg = transparent\n" ++
+"inactive_fg = #81A1C1\n" ++
+"inactive_bold = false\n" ++
+"\n" ++
+"[borders]\n" ++
+"active_fg = 33\n" ++
+"inactive_fg = 240\n" ++
+"style = single\n" ++
+"\n" ++
+"[general]\n" ++
+"shell =\n" ++
+"resize_delta = 0.05\n";
 
 pub fn unquote(s: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, s, " \t");
@@ -491,7 +477,6 @@ fn parseBindingKey(cfg: *Config, key: []const u8, val: []const u8) void {
     };
 
     if (action) |act| {
-        // Remove old default bindings for this action so user config replaces them
         var i: usize = 0;
         while (i < cfg.bindings.items.len) {
             if (cfg.bindings.items[i].action == act) {
@@ -644,20 +629,18 @@ test "config parse chords and ini" {
     var cfg = Config.init(testing.allocator);
     defer cfg.deinit();
 
-    const sample =
-        \\[keybindings]
-        \\new_tab = ctrl+shift+t, alt+t
-        \\split_horizontal = alt+shift+enter, ctrl+shift+d
-        \\
-        \\[tabs]
-        \\format = ' {title} '
-        \\active_format = " [{index}: {title}] "
-        \\inactive_format = '  #I: #W#F  '
-        \\active_bg = #ff5500
-        \\
-        \\[borders]
-        \\style = double
-    ;
+    const sample = "[keybindings]\n" ++
+        "new_tab = ctrl+shift+t, alt+t\n" ++
+        "split_horizontal = alt+shift+enter, ctrl+shift+d\n" ++
+        "\n" ++
+        "[tabs]\n" ++
+        "format = ' {title} '\n" ++
+        "active_format = \" [{index}: {title}] \"\n" ++
+        "inactive_format = '  #I: #W#F  '\n" ++
+        "active_bg = #ff5500\n" ++
+        "\n" ++
+        "[borders]\n" ++
+        "style = double\n";
 
     parseIniIntoConfig(sample, &cfg);
 
@@ -672,7 +655,6 @@ test "config parse chords and ini" {
     try testing.expectEqual(@as(u8, 0xff), cfg.theme.tab_active_bg.r);
     try testing.expectEqual(BorderStyle.double, cfg.theme.border_style);
 
-    // Test formatTabLabel with spaces, quotes, and tmux placeholders
     var buf: [128]u8 = undefined;
     const res_active = formatTabLabel(cfg.theme.getActiveTabFormat(), 1, "zsh", true, &buf);
     try testing.expectEqualStrings(" [1: zsh] ", res_active);
@@ -690,21 +672,14 @@ test "config parse chords and ini" {
     try testing.expectEqual(vterm_mod.ColorType.default, (parseColor("transparent") orelse unreachable).type);
     try testing.expectEqual(vterm_mod.ColorType.default, (parseColor("none") orelse unreachable).type);
 
-    // Test keybinding override
-    const override_sample =
-        \\[keybindings]
-        \\new_tab = alt+a
-        \\close_pane = none
-    ;
+    const override_sample = "[keybindings]\n" ++
+        "new_tab = alt+a\n" ++
+        "close_pane = none\n";
     parseIniIntoConfig(override_sample, &cfg);
 
-    // alt+a should now trigger new_tab
     try testing.expectEqual(@as(?Action, .new_tab), cfg.getAction(.{ .alt = true, .code = .{ .char = 'a' } }));
-    // alt+t should NO LONGER trigger new_tab
     try testing.expectEqual(@as(?Action, null), cfg.getAction(.{ .alt = true, .code = .{ .char = 't' } }));
-    // ctrl+shift+t should NO LONGER trigger new_tab
     try testing.expectEqual(@as(?Action, null), cfg.getAction(.{ .ctrl = true, .shift = true, .code = .{ .char = 't' } }));
-    // close_pane was set to none, so neither alt+w nor ctrl+shift+w should trigger close_pane
     try testing.expectEqual(@as(?Action, null), cfg.getAction(.{ .alt = true, .code = .{ .char = 'w' } }));
     try testing.expectEqual(@as(?Action, null), cfg.getAction(.{ .ctrl = true, .shift = true, .code = .{ .char = 'w' } }));
 }

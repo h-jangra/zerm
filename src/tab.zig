@@ -375,19 +375,16 @@ test "pane selection and text extraction" {
 
     pane.vterm.writeInput("hello world\r\nsecond line here");
 
-    // Test selection normalization and isSelected
     pane.selection = .{ .start_x = 0, .start_y = 0, .end_x = 4, .end_y = 0, .active = true };
     try testing.expect(pane.selection.isSelected(0, 0));
     try testing.expect(pane.selection.isSelected(4, 0));
     try testing.expect(!pane.selection.isSelected(5, 0));
 
-    // Test backwards selection
     pane.selection = .{ .start_x = 4, .start_y = 0, .end_x = 0, .end_y = 0, .active = true };
     try testing.expect(pane.selection.isSelected(0, 0));
     try testing.expect(pane.selection.isSelected(4, 0));
     try testing.expect(!pane.selection.isSelected(5, 0));
 
-    // Extract selected text
     const text_opt = try pane.getSelectedText(testing.allocator);
     try testing.expect(text_opt != null);
     if (text_opt) |txt| {
@@ -395,7 +392,6 @@ test "pane selection and text extraction" {
         try testing.expectEqualStrings("hello", txt);
     }
 
-    // Multi-line selection
     pane.selection = .{ .start_x = 6, .start_y = 0, .end_x = 5, .end_y = 1, .active = true };
     const multi_opt = try pane.getSelectedText(testing.allocator);
     try testing.expect(multi_opt != null);
@@ -404,7 +400,6 @@ test "pane selection and text extraction" {
         try testing.expectEqualStrings("world\nsecond", txt);
     }
 
-    // Clear selection
     pane.clearSelection();
     try testing.expect(!pane.selection.active);
     try testing.expect(!pane.selection.isSelected(0, 0));

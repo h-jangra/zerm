@@ -49,7 +49,6 @@ pub const App = struct {
     term_height: u16 = 24,
     force_render: bool = true,
     pending_close: ?PendingClose = null,
-    /// received (start marker seen, end marker not yet arrived).
     in_bracketed_paste: bool = false,
     paste_buf: std.ArrayList(u8) = .empty,
 
@@ -261,7 +260,7 @@ pub const App = struct {
         var pty_read_buf: [65536]u8 = undefined;
         var pollfds_buf: [64]posix.pollfd = undefined;
         var last_render_time: i64 = getMilliTimestamp();
-        const FRAME_TIME_MS: i64 = 8; // ~125 FPS for ultra-smooth animations and instant responsiveness
+        const FRAME_TIME_MS: i64 = 8;
 
         try self.renderer.render(self.tabs.items, self.active_tab_index, &self.cfg.theme, self.pendingPrompt());
         self.clearDirty();
@@ -443,7 +442,6 @@ pub const App = struct {
         }
         const protocol = self.activeKeyProtocol();
 
-        // not misread as keystrokes or CSI sequences mid-scan.
         if (self.in_bracketed_paste) {
             self.paste_buf.appendSlice(self.allocator, input) catch return;
             self.flushBracketedPaste();
@@ -479,7 +477,6 @@ pub const App = struct {
                 }
             }
 
-            // Alt+key sent in ESC-prefix mode arrives as ESC ESC [ ... .
             if (input[idx] == 0x1b and idx + 2 < input.len and input[idx + 1] == 0x1b and input[idx + 2] == '[') {
                 var end_pos = idx + 3;
                 while (end_pos < input.len and (input[end_pos] < 0x40 or input[end_pos] > 0x7e)) : (end_pos += 1) {}
@@ -591,7 +588,6 @@ pub const App = struct {
         if (tab.getActivePane()) |pane| {
             if (pane.selection.active) {
                 if (bytes.len == 1 and bytes[0] == 0x03) {
-                    // Ctrl+C with active selection: copy to clipboard and clear selection
                     pane.copySelectionToClipboard(self.allocator);
                     pane.clearSelection();
                     self.invalidate();
@@ -687,7 +683,6 @@ pub const App = struct {
                         if (pane.vterm.mouse_reporting and !has_shift) {
                             self.forwardMouseToPane(pane, leaf.rect, m, sx, sy);
                         } else {
-                            // Clear selection on other panes
                             for (self.tabs.items) |t| {
                                 var it = t.panes.valueIterator();
                                 while (it.next()) |other_ptr| {
@@ -705,17 +700,14 @@ pub const App = struct {
                                 if (pane.selection.selecting) {
                                     pane.selection.selecting = false;
                                     if (pane.selection.start_x == pane.selection.end_x and pane.selection.start_y == pane.selection.end_y) {
-                                        // Single click with no movement: clear selection
                                         pane.selection.active = false;
                                     } else {
-                                        // Mouse drag complete: activate selection and auto-copy to clipboard
                                         pane.selection.active = true;
                                         pane.copySelectionToClipboard(self.allocator);
                                     }
                                     self.invalidate();
                                 }
                             } else if (is_motion) {
-                                // Mouse drag motion (with any modifier: Shift, Ctrl, Alt)
                                 if (pane.selection.selecting) {
                                     pane.selection.end_x = pane_x;
                                     pane.selection.end_y = pane_y;
@@ -725,7 +717,6 @@ pub const App = struct {
                                     self.invalidate();
                                 }
                             } else if (is_left and !m.release) {
-                                // Mouse button down: start selection
                                 pane.selection = .{
                                     .start_x = pane_x,
                                     .start_y = pane_y,
@@ -736,7 +727,6 @@ pub const App = struct {
                                 };
                                 self.invalidate();
                             } else {
-                                // Right click or middle click
                                 if (pane.selection.active or pane.selection.selecting) {
                                     pane.clearSelection();
                                     self.invalidate();
@@ -777,7 +767,7 @@ pub const App = struct {
 
             var label_buf: [128]u8 = undefined;
             const label = config.formatTabLabel(fmt_pattern, i + 1, tab.getTitle(), is_active, &label_buf);
-            const tab_len: u16 = @intCast(label.len + 2); // left + right padding
+            const tab_len: u16 = @intCast(label.len + 2);
 
             if (click_x >= x and click_x < x + tab_len) {
                 self.active_tab_index = i;

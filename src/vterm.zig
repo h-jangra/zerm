@@ -698,7 +698,6 @@ pub const VTerm = struct {
                 if (b == '\\') {
                     self.state = .ground;
                 } else if (b == 0x1b) {
-                    // stay in esc
                 } else {
                     self.state = .ground;
                     self.processByte(b);
@@ -1374,7 +1373,6 @@ test "vterm fish modifyOtherKeys sequence does not trigger underline" {
     var vt = try VTerm.init(testing.allocator, 20, 5);
     defer vt.deinit();
 
-    // Fish shell sends \x1b[>4;1m for modifyOtherKeys. It must NOT turn on underline!
     vt.writeInput("\x1b[>4;1mprompt> ");
     try testing.expect(!vt.current_attrs.underline);
     try testing.expect(!vt.getCell(0, 0).attrs.underline);
@@ -1386,16 +1384,13 @@ test "vterm DCS XTGETTCAP sequence does not leak text to screen and sends respon
     var vt = try VTerm.init(testing.allocator, 20, 5);
     defer vt.deinit();
 
-    // Neovim/Vim sends XTGETTCAP query for Ms (clipboard): \x1bP+q4D73\x1b\\
     vt.writeInput("\x1bP+q4D73\x1b\\hello");
-    // '+', 'q', '4', 'D', '7', '3' must NOT be in the cell grid!
     try testing.expectEqual(@as(u21, 'h'), vt.getCell(0, 0).char);
     try testing.expectEqual(@as(u21, 'e'), vt.getCell(1, 0).char);
     try testing.expectEqual(@as(u21, 'l'), vt.getCell(2, 0).char);
     try testing.expectEqual(@as(u21, 'l'), vt.getCell(3, 0).char);
     try testing.expectEqual(@as(u21, 'o'), vt.getCell(4, 0).char);
 
-    // reply_buf should have invalid capability reply \x1bP0+r4D73\x1b\\
     try testing.expectEqualStrings("\x1bP0+r4D73\x1b\\", vt.reply_buf[0..vt.reply_len]);
 }
 
@@ -1404,25 +1399,20 @@ test "vterm alternate screen preserves and restores cursor position across app e
     var vt = try VTerm.init(testing.allocator, 80, 24);
     defer vt.deinit();
 
-    // User is on line 2 (e.g. after typing "vim file.txt")
     vt.cursor_x = 14;
     vt.cursor_y = 2;
 
-    // Vim enters alternate screen
     vt.writeInput("\x1b[?1049h");
     try testing.expect(vt.is_alt_screen);
     try testing.expectEqual(@as(u16, 0), vt.cursor_x);
     try testing.expectEqual(@as(u16, 0), vt.cursor_y);
 
-    // Vim positions cursor at row 24 on exit: \x1b[24;1H
     vt.writeInput("\x1b[24;1H");
     try testing.expectEqual(@as(u16, 23), vt.cursor_y);
 
-    // Vim exits alternate screen: \x1b[?1049l
     vt.writeInput("\x1b[?1049l");
     try testing.expect(!vt.is_alt_screen);
 
-    // Cursor position should be restored back to (14, 2), NOT left at 23!
     try testing.expectEqual(@as(u16, 14), vt.cursor_x);
     try testing.expectEqual(@as(u16, 2), vt.cursor_y);
 }
@@ -1463,16 +1453,13 @@ test "vterm DECRQM mode query reports bracketed paste status" {
     var vt = try VTerm.init(testing.allocator, 20, 5);
     defer vt.deinit();
 
-    // Query bracketed paste when disabled (default)
     vt.writeInput("\x1b[?2004$p");
     try testing.expectEqualStrings("\x1b[?2004;2$y", vt.reply_buf[0..vt.reply_len]);
 
-    // Enable bracketed paste and query again
     vt.reply_len = 0;
     vt.writeInput("\x1b[?2004h\x1b[?2004$p");
     try testing.expectEqualStrings("\x1b[?2004;1$y", vt.reply_buf[0..vt.reply_len]);
 
-    // Disable bracketed paste and query again
     vt.reply_len = 0;
     vt.writeInput("\x1b[?2004l\x1b[?2004$p");
     try testing.expectEqualStrings("\x1b[?2004;2$y", vt.reply_buf[0..vt.reply_len]);
@@ -1483,9 +1470,7 @@ test "vterm batched CPR and DECRQM queries respond completely without dropping" 
     var vt = try VTerm.init(testing.allocator, 80, 24);
     defer vt.deinit();
 
-    // fzf / tcell sends: \x1b[6n\x1b[?2004$p\x1b[6n
     vt.writeInput("\x1b[6n\x1b[?2004$p\x1b[6n");
-    // All 3 responses must be present in reply_buf in sequence!
     try testing.expectEqualStrings("\x1b[1;1R\x1b[?2004;2$y\x1b[1;1R", vt.reply_buf[0..vt.reply_len]);
 }
 
@@ -1514,7 +1499,6 @@ test "scrollback ring buffer wrapping and capacity retention" {
     try testing.expectEqual(@as(u21, 'A'), sb.get(0).?[0].char);
     try testing.expectEqual(@as(u21, 'E'), sb.get(4).?[0].char);
 
-    // Push 6th line: should evict line1 ('A') and keep lines B, C, D, E, F
     try sb.push(&line6);
     try testing.expectEqual(@as(usize, 5), sb.len());
     try testing.expectEqual(@as(u21, 'B'), sb.get(0).?[0].char);
@@ -1529,23 +1513,18 @@ test "vterm OSC 0, 1, 2, 7, 30 title handling" {
     var vt = try VTerm.init(testing.allocator, 80, 24);
     defer vt.deinit();
 
-    // Bash PROMPT_COMMAND / echo -ne "\033]0;${PWD}\007"
     vt.writeInput("\x1b]0;/home/hj/Projects/zerm\x07");
     try testing.expectEqualStrings("/home/hj/Projects/zerm", vt.title[0..vt.title_len]);
 
-    // OSC 2 (window title)
     vt.writeInput("\x1b]2;my-window-title\x07");
     try testing.expectEqualStrings("my-window-title", vt.title[0..vt.title_len]);
 
-    // OSC 1 (icon title)
     vt.writeInput("\x1b]1;icon-name\x07");
     try testing.expectEqualStrings("icon-name", vt.title[0..vt.title_len]);
 
-    // OSC 30 (tab title)
     vt.writeInput("\x1b]30;tab-name\x07");
     try testing.expectEqualStrings("tab-name", vt.title[0..vt.title_len]);
 
-    // OSC 7 with file://localhost/...
     vt.writeInput("\x1b]7;file://localhost/home/hj/docs\x07");
     try testing.expectEqualStrings("/home/hj/docs", vt.title[0..vt.title_len]);
 }

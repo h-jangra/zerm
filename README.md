@@ -27,7 +27,7 @@ It focuses on a simple, modern workflow with **tabs and splits** — without ses
 | Previous tab     | `Ctrl+Shift+Tab` / `Alt+P`   |
 | Vertical split   | `Ctrl+Shift+Enter` / `Alt+V` |
 | Horizontal split | `Ctrl+Shift+D` / `Alt+D`     |
-| Navigate panes   | `Alt+Arrow` / `Alt+HJKL`     |
+| Navigate panes   | `Alt+Arrow`                  |
 | Resize panes     | `Alt+Shift+Arrow`            |
 
 New tabs and splits open in the working directory of the focused pane. Keys
