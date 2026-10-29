@@ -49,6 +49,9 @@ pub const App = struct {
     term_height: u16 = 24,
     force_render: bool = true,
     pending_close: ?PendingClose = null,
+    /// received (start marker seen, end marker not yet arrived).
+    in_bracketed_paste: bool = false,
+    paste_buf: std.ArrayList(u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, shell_arg: ?[]const u8) !*App {
         const app = try allocator.create(App);
@@ -90,6 +93,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.paste_buf.deinit(self.allocator);
         for (self.tabs.items) |tab| {
             tab.deinit();
         }
@@ -438,8 +442,30 @@ pub const App = struct {
             return;
         }
         const protocol = self.activeKeyProtocol();
+
+        // not misread as keystrokes or CSI sequences mid-scan.
+        if (self.in_bracketed_paste) {
+            self.paste_buf.appendSlice(self.allocator, input) catch return;
+            self.flushBracketedPaste();
+            return;
+        }
+
         var idx: usize = 0;
         while (idx < input.len) {
+            if (std.mem.startsWith(u8, input[idx..], "\x1b[200~")) {
+                idx += 6;
+                self.in_bracketed_paste = true;
+                self.paste_buf.clearRetainingCapacity();
+                self.paste_buf.appendSlice(self.allocator, input[idx..]) catch return;
+                self.flushBracketedPaste();
+                return;
+            }
+
+            if (std.mem.startsWith(u8, input[idx..], "\x1b[201~")) {
+                idx += 6;
+                continue;
+            }
+
             if (std.mem.startsWith(u8, input[idx..], "\x1b[<")) {
                 var end_pos = idx + 3;
                 while (end_pos < input.len and input[end_pos] != 'M' and input[end_pos] != 'm') : (end_pos += 1) {}
@@ -488,6 +514,40 @@ pub const App = struct {
             self.dispatchParsedInput(parsed);
             idx += 1;
         }
+    }
+
+    fn flushBracketedPaste(self: *App) void {
+        const items = self.paste_buf.items;
+        const end = std.mem.indexOf(u8, items, "\x1b[201~") orelse return;
+        const rest = self.allocator.dupe(u8, items[end + 6 ..]) catch null;
+        self.in_bracketed_paste = false;
+        self.forwardPaste(items[0..end]);
+        self.paste_buf.clearRetainingCapacity();
+        if (rest) |r| {
+            defer self.allocator.free(r);
+            if (r.len > 0) self.handleInput(r);
+        }
+    }
+
+    fn forwardPaste(self: *App, text: []const u8) void {
+        if (self.active_tab_index >= self.tabs.items.len) return;
+        const tab = self.tabs.items[self.active_tab_index];
+        const pane = tab.getActivePane() orelse return;
+
+        var translated = std.ArrayList(u8).empty;
+        defer translated.deinit(self.allocator);
+
+        if (pane.vterm.bracketed_paste) {
+            translated.appendSlice(self.allocator, "\x1b[200~") catch return;
+            translated.appendSlice(self.allocator, text) catch return;
+            translated.appendSlice(self.allocator, "\x1b[201~") catch return;
+        } else {
+            const legacy = input_mod.translatePasteToLegacy(self.allocator, text) catch return;
+            defer self.allocator.free(legacy);
+            self.forwardInputBytes(legacy);
+            return;
+        }
+        self.forwardInputBytes(translated.items);
     }
 
     fn clearAllSelections(self: *App) void {
@@ -717,7 +777,7 @@ pub const App = struct {
 
             var label_buf: [128]u8 = undefined;
             const label = config.formatTabLabel(fmt_pattern, i + 1, tab.getTitle(), is_active, &label_buf);
-            const tab_len: u16 = @intCast(label.len);
+            const tab_len: u16 = @intCast(label.len + 2); // left + right padding
 
             if (click_x >= x and click_x < x + tab_len) {
                 self.active_tab_index = i;

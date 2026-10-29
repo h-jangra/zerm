@@ -126,16 +126,17 @@ pub const Renderer = struct {
         }
 
         if (prompt) |message| {
-            self.renderPrompt(message);
+            self.renderPrompt(message, tab_bar_h);
         }
 
         try self.flushDiff(active_tab, tab_bar_h, prompt);
     }
 
-    fn renderPrompt(self: *Renderer, message: []const u8) void {
+    fn renderPrompt(self: *Renderer, message: []const u8, tab_bar_h: u16) void {
         if (self.height == 0) return;
 
-        const row_offset = @as(usize, self.height - 1) * self.width;
+        const prompt_row: u16 = if (tab_bar_h > 0 and self.height > 1) self.height - 2 else self.height - 1;
+        const row_offset = @as(usize, prompt_row) * self.width;
         const bg = vterm_mod.Color.rgb(0x4C, 0x2A, 0x2A);
         const fg = vterm_mod.Color.rgb(0xEC, 0xEF, 0xF4);
 
@@ -199,6 +200,12 @@ pub const Renderer = struct {
                 x += 1;
             }
 
+            // left padding
+            if (x < max_x) {
+                self.back[row_offset + x] = .{ .char = ' ', .fg = fg, .bg = bg, .attrs = attrs };
+                x += 1;
+            }
+
             for (label) |ch| {
                 if (x >= max_x) break;
                 self.back[row_offset + x] = .{
@@ -207,6 +214,12 @@ pub const Renderer = struct {
                     .bg = bg,
                     .attrs = attrs,
                 };
+                x += 1;
+            }
+
+            // right padding
+            if (x < max_x) {
+                self.back[row_offset + x] = .{ .char = ' ', .fg = fg, .bg = bg, .attrs = attrs };
                 x += 1;
             }
         }
@@ -242,7 +255,7 @@ pub const Renderer = struct {
                     const sx = rect.x + px;
                     var cell = pane.vterm.getRenderCell(px, py);
                     if (norm) |n| {
-                        const in_sel = (sy >= n.s_y and sy <= n.e_y) and blk: {
+                        const in_sel = (py >= n.s_y and py <= n.e_y) and blk: {
                             if (n.s_y == n.e_y) break :blk (px >= n.s_x and px <= n.e_x);
                             if (py == n.s_y) break :blk (px >= n.s_x);
                             if (py == n.e_y) break :blk (px <= n.e_x);

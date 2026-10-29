@@ -36,12 +36,12 @@ pub const TerminalState = struct {
         try posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, raw);
         self.raw_enabled = true;
 
-        const enter_seq = "\x1b[?1049h\x1b[?25h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[>1u\x1b[>4;2m";
+        const enter_seq = "\x1b[?1049h\x1b[?25h\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[>1u\x1b[>4;2m";
         _ = posix.system.write(posix.STDOUT_FILENO, enter_seq.ptr, enter_seq.len);
     }
 
     pub fn restore(self: *TerminalState) void {
-        const leave_seq = "\x1b[0m\x1b[0 q\x1b[?25h\x1b[>4;0m\x1b[<u\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?1049l";
+        const leave_seq = "\x1b[0m\x1b[0 q\x1b[?25h\x1b[>4;0m\x1b[<u\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?1049l";
         _ = posix.system.write(posix.STDOUT_FILENO, leave_seq.ptr, leave_seq.len);
 
         if (self.raw_enabled) {

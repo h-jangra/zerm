@@ -8,9 +8,6 @@ pub const MouseEvent = struct {
     release: bool,
 };
 
-/// Keyboard encoding negotiated by the application running inside a pane.
-/// Terminals (and multiplexers) use this to decide how to forward keys that
-/// only exist in an extended encoding (Shift+Enter, Ctrl+Tab, ...).
 pub const KeyProtocol = enum {
     legacy,
     modify_other_keys,
@@ -34,6 +31,55 @@ pub const InputResult = union(enum) {
     sequence: EscapeSequence,
 };
 
+pub fn translatePasteToLegacy(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out = try std.ArrayList(u8).initCapacity(allocator, text.len);
+    errdefer out.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const b = text[i];
+        if (b == '\r') {
+            try out.append(allocator, '\r');
+            if (i + 1 < text.len and text[i + 1] == '\n') i += 1;
+        } else if (b == '\n') {
+            try out.append(allocator, '\r');
+        } else {
+            try out.append(allocator, b);
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "translatePasteToLegacy converts line breaks to CR" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // LF becomes CR
+    {
+        const out = try translatePasteToLegacy(allocator, "line1\nline2\nline3");
+        defer allocator.free(out);
+        try testing.expectEqualStrings("line1\rline2\rline3", out);
+    }
+    // CRLF collapses to a single CR
+    {
+        const out = try translatePasteToLegacy(allocator, "a\r\nb");
+        defer allocator.free(out);
+        try testing.expectEqualStrings("a\rb", out);
+    }
+    // Plain text passes through untouched
+    {
+        const out = try translatePasteToLegacy(allocator, "no newlines here");
+        defer allocator.free(out);
+        try testing.expectEqualStrings("no newlines here", out);
+    }
+    // Empty input
+    {
+        const out = try translatePasteToLegacy(allocator, "");
+        defer allocator.free(out);
+        try testing.expectEqual(@as(usize, 0), out.len);
+    }
+}
+
 pub fn parseInput(bytes: []const u8, cfg: *const config.Config, protocol: KeyProtocol) InputResult {
     if (bytes.len == 0) return .{ .raw = bytes };
 
@@ -53,9 +99,6 @@ pub fn parseInput(bytes: []const u8, cfg: *const config.Config, protocol: KeyPro
         }
     }
 
-    // Applies to keys zerm has no KeyCode for (Home/End/Insert/Delete): strip
-    // the explicit "no modifier" (1) that modifyOtherKeys/kitty terminals put
-    // in the sequence, because shell line editors only know the legacy forms.
     if (normalizeFunctionKey(bytes)) |seq| {
         return .{ .sequence = seq };
     }
@@ -80,11 +123,6 @@ fn parseParam(tok: []const u8) ?Param {
     return .{ .value = value, .event = event };
 }
 
-/// Decode a modifier parameter into a key chord. The kitty keyboard protocol
-/// adds CapsLock (64) and NumLock (128) to the modifier parameter; those bits
-/// must not be mistaken for Ctrl/Alt/Shift, otherwise a plain arrow with
-/// NumLock on becomes Alt+Arrow (and unknown sequences get forwarded raw to
-/// the pane, where readline mangles them into literal text like "9A").
 fn chordFromMods(mod: u32, code: config.KeyCode) config.KeyChord {
     const bits: u32 = if (mod > 0) (mod - 1) & 0x7 else 0;
     return .{
@@ -95,7 +133,6 @@ fn chordFromMods(mod: u32, code: config.KeyCode) config.KeyChord {
     };
 }
 
-/// Map a kitty/modifyOtherKeys codepoint to a KeyCode we know about.
 fn codepointToKeyCode(code: u32) ?config.KeyCode {
     return switch (code) {
         13 => .enter,
@@ -121,9 +158,6 @@ fn codepointToKeyCode(code: u32) ?config.KeyCode {
 
 const FuncKey = enum { home, end, insert, delete };
 
-/// Normalize Home/End/Insert/Delete to the legacy xterm encodings that shell
-/// line editors understand. Handles xterm (CSI H/F, CSI n~) and kitty
-/// (CSI 57348...u) forms, with or without lock bits in the modifier.
 fn normalizeFunctionKey(bytes: []const u8) ?EscapeSequence {
     if (bytes.len < 3 or bytes[0] != 0x1b or bytes[1] != '[') return null;
 
@@ -193,9 +227,6 @@ fn normalizeFunctionKey(bytes: []const u8) ?EscapeSequence {
     return seq;
 }
 
-/// Encode keys that have no legacy encoding into the protocol the application
-/// inside the pane asked for. This is what makes Shift+Enter insert a newline
-/// in TUI apps (opencode, etc.) while keeping the plain shell unaffected.
 fn encodeExtendedKey(chord: config.KeyChord, protocol: KeyProtocol) ?EscapeSequence {
     const mod: u8 = 1 +
         @as(u8, @intFromBool(chord.shift)) +
@@ -206,8 +237,6 @@ fn encodeExtendedKey(chord: config.KeyChord, protocol: KeyProtocol) ?EscapeSeque
         .enter => {
             // Plain Enter is always a carriage return.
             if (!chord.shift and !chord.ctrl and !chord.alt) return null;
-            // Without a negotiated extended protocol fall back to legacy
-            // handling (Shift+Enter behaves like plain Enter).
             if (protocol == .legacy) return null;
             var seq = EscapeSequence{};
             if (protocol == .kitty) {
@@ -234,10 +263,6 @@ fn encodeExtendedKey(chord: config.KeyChord, protocol: KeyProtocol) ?EscapeSeque
             }
             return seq;
         },
-        // Terminals that negotiate modifyOtherKeys/kitty report even
-        // unmodified cursor keys with an explicit "1" modifier
-        // (CSI 1;1A). Readline and other line editors only understand the
-        // legacy forms, so normalize unmodified keys back to them.
         .up, .down, .left, .right => {
             const final: u8 = switch (chord.code) {
                 .up => 'A',
@@ -272,8 +297,6 @@ fn encodeExtendedKey(chord: config.KeyChord, protocol: KeyProtocol) ?EscapeSeque
             return seq;
         },
         .char => |c| {
-            // Alt+<printable> is an ESC prefix in the legacy encoding. Kitty
-            // terminals report it as CSI <code>;3u, which readline would just
             // print verbatim.
             if (chord.alt and !chord.ctrl and c >= 0x20 and c <= 0x7e) {
                 var seq = EscapeSequence{};
@@ -357,8 +380,6 @@ pub fn parseSgrMouse(bytes: []const u8) ?MouseEvent {
 pub fn extractChord(bytes: []const u8) ?config.KeyChord {
     if (bytes.len == 0) return null;
 
-    // Terminals configured to send ESC for Alt prefix Alt+<key> with an extra
-    // ESC, e.g. Alt+Left arrives as ESC ESC [ D.
     if (bytes.len >= 4 and bytes[0] == 0x1b and bytes[1] == 0x1b and bytes[2] == '[') {
         if (extractChord(bytes[1..])) |inner| {
             var chord = inner;
@@ -367,7 +388,6 @@ pub fn extractChord(bytes: []const u8) ?config.KeyChord {
         }
     }
 
-    // xterm modifyOtherKeys: CSI 27 ; modifiers ; codepoint ~
     if (bytes.len >= 7 and std.mem.startsWith(u8, bytes, "\x1b[27;") and bytes[bytes.len - 1] == '~') {
         const inner = bytes[5 .. bytes.len - 1];
         var it = std.mem.splitScalar(u8, inner, ';');
@@ -379,10 +399,6 @@ pub fn extractChord(bytes: []const u8) ?config.KeyChord {
         }
     }
 
-    // Extended encodings shared by kitty (CSI ... u) and xterm
-    // (CSI ... ~, CSI 1 ; mods A-D). Modifier parameters can be multi-digit
-    // because they include CapsLock (64) and NumLock (128) bits; lock bits
-    // are stripped in chordFromMods.
     if (bytes.len >= 3 and bytes[0] == 0x1b and bytes[1] == '[') {
         const final = bytes[bytes.len - 1];
         const inner = bytes[2 .. bytes.len - 1];
@@ -577,7 +593,6 @@ test "input parse chord and actions" {
     const res_alt_left = parseInput("\x1b\x1b[D", &cfg, .legacy);
     try testing.expectEqual(config.Action.focus_left, res_alt_left.action);
 
-    // Unmodified cursor keys reported with an explicit modifier must be
     // normalized to the legacy form (readline expects ESC [ A, not ESC [ 1;1A).
     const res_up = parseInput("\x1b[1;1A", &cfg, .legacy);
     try testing.expect(res_up == .sequence);
@@ -638,8 +653,6 @@ test "lock bits in modifier parameters do not become modifiers" {
     var cfg = config.Config.init(testing.allocator);
     defer cfg.deinit();
 
-    // CapsLock (64) and NumLock (128) are part of the kitty modifier
-    // parameter. A plain arrow with NumLock on arrives as CSI 1;129A and
     // must still be an unmodified arrow, not Alt+Arrow.
     const up_num = parseInput("\x1b[1;129A", &cfg, .legacy);
     try testing.expect(up_num == .sequence);
@@ -702,7 +715,6 @@ test "lock bits in modifier parameters do not become modifiers" {
     try testing.expect(ins_caps == .sequence);
     try testing.expectEqualStrings("\x1b[2~", ins_caps.sequence.slice());
 
-    // Kitty Alt+letter has a legacy ESC prefix; readline would otherwise
     // print the escape sequence verbatim.
     const alt_b = parseInput("\x1b[98;3u", &cfg, .legacy);
     try testing.expect(alt_b == .sequence);

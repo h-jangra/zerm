@@ -98,11 +98,11 @@ pub const Theme = struct {
     tab_bar_bg: vterm_mod.Color = vterm_mod.Color.defaultColor(),
     // Slightly lighter background behind the active tab name
     tab_active_bg: vterm_mod.Color = vterm_mod.Color.rgb(0x3B, 0x42, 0x52),
-    tab_active_fg: vterm_mod.Color = vterm_mod.Color.rgb(0x81, 0xA1, 0xC1),
+    tab_active_fg: vterm_mod.Color = vterm_mod.Color.rgb(0x88, 0xC0, 0xD0),
     tab_active_bold: bool = true,
 
     tab_inactive_bg: vterm_mod.Color = vterm_mod.Color.defaultColor(),
-    tab_inactive_fg: vterm_mod.Color = vterm_mod.Color.rgb(0x81, 0xA1, 0xC1),
+    tab_inactive_fg: vterm_mod.Color = vterm_mod.Color.rgb(0xEC, 0xEF, 0xF4),
     tab_inactive_bold: bool = false,
 
     border_active_fg: vterm_mod.Color = vterm_mod.Color.indexed(33),
@@ -221,26 +221,6 @@ pub const Config = struct {
         try self.addBinding(.{ .ctrl = true, .shift = true, .code = .up }, .focus_up);
         try self.addBinding(.{ .ctrl = true, .shift = true, .code = .down }, .focus_down);
 
-        try self.addBinding(.{ .alt = true, .code = .left }, .focus_left);
-        try self.addBinding(.{ .alt = true, .code = .right }, .focus_right);
-        try self.addBinding(.{ .alt = true, .code = .up }, .focus_up);
-        try self.addBinding(.{ .alt = true, .code = .down }, .focus_down);
-
-        try self.addBinding(.{ .alt = true, .code = .{ .char = 'h' } }, .focus_left);
-        try self.addBinding(.{ .alt = true, .code = .{ .char = 'l' } }, .focus_right);
-        try self.addBinding(.{ .alt = true, .code = .{ .char = 'k' } }, .focus_up);
-        try self.addBinding(.{ .alt = true, .code = .{ .char = 'j' } }, .focus_down);
-
-        try self.addBinding(.{ .alt = true, .shift = true, .code = .left }, .resize_left);
-        try self.addBinding(.{ .alt = true, .shift = true, .code = .right }, .resize_right);
-        try self.addBinding(.{ .alt = true, .shift = true, .code = .up }, .resize_up);
-        try self.addBinding(.{ .alt = true, .shift = true, .code = .down }, .resize_down);
-
-        try self.addBinding(.{ .alt = true, .shift = true, .code = .{ .char = 'h' } }, .resize_left);
-        try self.addBinding(.{ .alt = true, .shift = true, .code = .{ .char = 'l' } }, .resize_right);
-        try self.addBinding(.{ .alt = true, .shift = true, .code = .{ .char = 'k' } }, .resize_up);
-        try self.addBinding(.{ .alt = true, .shift = true, .code = .{ .char = 'j' } }, .resize_down);
-
         try self.addBinding(.{ .shift = true, .code = .page_up }, .scroll_page_up);
         try self.addBinding(.{ .shift = true, .code = .page_down }, .scroll_page_down);
         try self.addBinding(.{ .ctrl = true, .shift = true, .code = .{ .char = 'u' } }, .scroll_page_up);
@@ -266,10 +246,10 @@ pub const default_ini_content =
     \\prev_tab = ctrl+shift+tab, ctrl+shift+p, alt+p
     \\split_vertical = ctrl+shift+enter, alt+enter, alt+v
     \\split_horizontal = alt+shift+enter, ctrl+shift+d, alt+d
-    \\focus_left = ctrl+shift+left, alt+left, alt+h
-    \\focus_right = ctrl+shift+right, alt+right, alt+l
-    \\focus_up = ctrl+shift+up, alt+up, alt+k
-    \\focus_down = ctrl+shift+down, alt+down, alt+j
+    \\focus_left = ctrl+shift+left
+    \\focus_right = ctrl+shift+right
+    \\focus_up = ctrl+shift+up
+    \\focus_down = ctrl+shift+down
     \\resize_left = alt+shift+left, alt+H
     \\resize_right = alt+shift+right, alt+L
     \\resize_up = alt+shift+up, alt+K

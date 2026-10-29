@@ -108,9 +108,6 @@ pub const Pane = struct {
         return if (had_read) true else self.pty.checkAlive();
     }
 
-    /// Watch for keyboard protocol negotiation requests coming from programs
-    /// running inside the pane (kitty "CSI > 1 u" / xterm modifyOtherKeys
-    /// "CSI > 4 ; 2 m"). Needed to know how to encode Shift+Enter etc.
     fn scanKeyProtocol(self: *Pane, chunk: []const u8) void {
         var i: usize = 0;
         while (i < chunk.len) : (i += 1) {
@@ -128,15 +125,10 @@ pub const Pane = struct {
         }
     }
 
-    /// Working directory of the program currently running in this pane.
     pub fn getCwd(self: *Pane, buf: []u8) ?[]const u8 {
         return self.pty.getCwd(buf);
     }
 
-    /// Whether the pane currently shows a running full-screen/TUI application
-    /// (opencode, nvim, htop, less, ...). Prompt wrappers such as `ghost` also
-    /// own the terminal while a shell sits idle, but they stay on the primary
-    /// screen, so checking the alternate screen avoids false positives.
     pub fn isAppRunning(self: *Pane) bool {
         return self.vterm.is_alt_screen;
     }

@@ -155,8 +155,6 @@ pub const Pty = struct {
         _ = posix.system.ioctl(self.master, posix.T.IOCSWINSZ, @intFromPtr(&ws));
     }
 
-    /// Current working directory of the shell running in this pane. Used so
-    /// new tabs/panes inherit the directory they are opened from.
     pub fn getCwd(self: *Pty, buf: []u8) ?[]const u8 {
         if (readProcCwd(self.pid, buf)) |cwd| return cwd;
 
